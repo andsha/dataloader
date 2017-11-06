@@ -2,105 +2,41 @@ package main
 
 import (
 	"errors"
-
-	"github.com/andsha/postgresutils"
+    "time"
 
 	"github.com/andsha/vconfig"
 )
 
 type table interface {
-	needRunUpload()
-	latestAvailableData()
-	getUploadSets()
-	copySourceToServer()
-	uploadServerToDestination()
+    getTableDescription() ([]string, error)
+    getAvailabeDataTimeRanges() ([][]time.Time, error)
+    checkTable(descrition []string) (bool, error)
+    connect() error
+    cleanup() error
+    disconnect() error
+    getData([]time.Time) ([]byte, error)
+    uploadData([]byte) error
 }
 
-// ***********************************   Postgres factory **********************
-type pgtable struct {
-	sec    vconfig.Section
-	pgconn *postgresutils.PostgresProcess
+type generictable struct {
+    tablesection    *vconfig.Section
+    upload      *upload
+    tempFiles []string
 }
 
-func (t *pgtable) needRunUpload()             {}
-func (t *pgtable) latestAvailableData()       {}
-func (t *pgtable) getUploadSets()             {}
-func (t *pgtable) copySourceToServer()        {}
-func (t *pgtable) uploadServerToDestination() {}
+func NewTable(tsec *vconfig.Section, ul *upload) (table, error) {
+	tType, err := tsec.GetSingleValue("host", "")
+	if err != nil {return nil, err}
+    ct := new(generictable)
+    ct.tablesection = tsec
+    ct.upload = ul
 
-// ***********************************   SFTP factory **********************
-type sftptable struct {
-	sec    vconfig.Section
-	pgconn *postgresutils.PostgresProcess
-}
-
-func (t *sftptable) needRunUpload()             {}
-func (t *sftptable) latestAvailableData()       {}
-func (t *sftptable) getUploadSets()             {}
-func (t *sftptable) copySourceToServer()        {}
-func (t *sftptable) uploadServerToDestination() {}
-
-// ***********************************   Hadoop factory **********************
-type hadooptable struct {
-	sec    vconfig.Section
-	pgconn *postgresutils.PostgresProcess
-}
-
-func (t *hadooptable) needRunUpload()             {}
-func (t *hadooptable) latestAvailableData()       {}
-func (t *hadooptable) getUploadSets()             {}
-func (t *hadooptable) copySourceToServer()        {}
-func (t *hadooptable) uploadServerToDestination() {}
-
-// ***********************************   Omniture factory **********************
-type omnituretable struct {
-	sec    vconfig.Section
-	pgconn *postgresutils.PostgresProcess
-}
-
-func (t *omnituretable) needRunUpload()             {}
-func (t *omnituretable) latestAvailableData()       {}
-func (t *omnituretable) getUploadSets()             {}
-func (t *omnituretable) copySourceToServer()        {}
-func (t *omnituretable) uploadServerToDestination() {}
-
-func NewTable(sec vconfig.Section, historyTableConn *postgresutils.PostgresProcess) (table, error) {
-	tType, err := sec.GetSingleValue("type", "")
-	if err != nil {
-		return nil, err
-	}
-	switch tType {
+    switch tType {
 	case "postgres":
 		t := new(pgtable)
-		t.sec = sec
-		t.pgconn = historyTableConn
-		return t, nil
-	case "sftp":
-		t := new(sftptable)
-		t.sec = sec
-		t.pgconn = historyTableConn
-		return t, nil
-	case "hadoop":
-		t := new(hadooptable)
-		t.sec = sec
-		t.pgconn = historyTableConn
-		return t, nil
-	case "omniture":
-		t := new(omnituretable)
-		t.sec = sec
-		t.pgconn = historyTableConn
+        t.generictable = *ct
 		return t, nil
 	default:
 		return nil, errors.New("No such type of table")
 	}
 }
-
-// func NeedRunUpload
-
-// func LatestAvailableData
-
-// func GetUploadSets
-
-// func CopyToServer
-
-// func UploadToDestination

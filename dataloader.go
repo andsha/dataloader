@@ -9,13 +9,10 @@ import (
 	"strconv"
 	"sync"
 	"syscall"
-
 	"time"
 
 	"github.com/andsha/postgresutils"
-
 	"github.com/andsha/vconfig"
-
 	"github.com/sirupsen/logrus"
 )
 
@@ -25,7 +22,7 @@ type cmdflags struct {
 	force   bool
 	days    int
 	threads int
-	today   string
+	todate   string
 }
 
 // new instance of logger
@@ -34,45 +31,10 @@ func (flags *cmdflags) parseCmdFlags() {
 	flag.BoolVar(&flags.verbose, "verbose", false, "Show more output")
 	flag.StringVar(&flags.config, "config", "", "path to the file that describes configuration")
 	flag.BoolVar(&flags.force, "force", false, "force report running")
-	flag.IntVar(&flags.days, "days", 7, "How many days to sync...")
+	flag.IntVar(&flags.days, "days", 1, "How many days to sync...")
 	flag.IntVar(&flags.threads, "threads", 5, "How many threads to run...")
-	flag.StringVar(&flags.today, "todate", "", "generate feed for 'today'")
+	flag.StringVar(&flags.todate, "todate", "", "generate feed for 'todate'")
 	flag.Parse()
-}
-
-type lSection struct {
-	vconfig.Section
-}
-
-func (sec *lSection) getDBConnParameters() (map[string]string, error) {
-	dbParams := make(map[string]string)
-	host, err := sec.GetSingleValue("host", "")
-	if err != nil {
-		return nil, err
-	}
-	dbParams["host"] = host
-	port, err := sec.GetSingleValue("port", "5432")
-	if err != nil {
-		return nil, err
-	}
-	dbParams["port"] = port
-	database, err := sec.GetSingleValue("database", "")
-	if err != nil {
-		return nil, err
-	}
-	dbParams["database"] = database
-	user, err := sec.GetSingleValue("userName", "")
-	if err != nil {
-		return nil, err
-	}
-	dbParams["user"] = user
-	password, err := sec.GetSingleValue("password", "5432")
-	if err != nil {
-		return nil, err
-	}
-	dbParams["password"] = password
-
-	return dbParams, nil
 }
 
 func main() {
@@ -97,10 +59,12 @@ func main() {
 
 	// Read Config
 	configFile := flags.config
-	config, err := vconfig.New(configFile)
+	cfg, err := vconfig.New(configFile)
 	if err != nil {
 		logging.Fatal(fmt.Sprintf("Could not read config %v", configFile))
 	}
+	var config lvconfig // this is extension for vconfig
+	config.VConfig = cfg
 
 	// Connect to postgres
 	writeReportsPGDBSections, err := config.GetSections("writeReportsPGDB")
@@ -128,6 +92,11 @@ func main() {
 		logging.Fatal(err)
 	}
 	defer pgconnWriteReports.CloseDB()
+
+	// update config by expansion of dbUploads
+	if err := config.updateDBUploads(); err != nil {
+		logging.Fatal(err)
+	}
 
 	// history table
 	schema, err := lsec.GetSingleValue("schema", "")
@@ -159,14 +128,12 @@ func main() {
 
 	// create queue of uploads according to priority
 	for _, uploadSection := range usections {
+		// we copy current config to new upload object, thus all futher modifications
+		// won't be propagated to upload
 		ul, err := newUpload(*uploadSection, config, logging, *flags, pgconnWriteReports)
-		if err != nil {
-			logging.Fatal(err)
-		}
+		if err != nil {logging.Fatal(err)}
 		queue, err := ul.m_sec.GetSingleValue("priority", "5")
-		if queue == "" {
-			logging.Fatal(err)
-		}
+		if queue == "" {logging.Fatal(err)}
 		nqueue, _ := strconv.Atoi(queue)
 
 		if _, ok := uploads[nqueue]; ok {
@@ -188,7 +155,7 @@ func main() {
 	runningUploadSections := make(map[string]*upload)
 	var rusMutex = &sync.Mutex{}
 
-	// Channel to be sent with every goroutine; checks result of upload run
+	// Channel for receiving upload rsult
 	result := make(chan uploadResult)
 
 	// Channel for stopping checkUploadResult routine

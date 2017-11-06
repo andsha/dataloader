@@ -3,25 +3,21 @@ package main
 import (
 	"errors"
 	"fmt"
-	"math/rand"
+	//"math/rand"
 	"time"
 
 	"github.com/andsha/postgresutils"
-
 	"github.com/andsha/vconfig"
-
 	"github.com/sirupsen/logrus"
 )
 
 type upload struct {
 	m_sec         vconfig.Section
 	m_name        string
-	m_vconfig     vconfig.VConfig
+	m_vconfig     lvconfig
 	m_logger      *logrus.Entry
 	m_flags       cmdflags
 	m_pgconn      *postgresutils.PostgresProcess
-	m_source      *table
-	m_destination *table
 	ping          chan bool
 	abortUpload   chan bool
 }
@@ -29,11 +25,12 @@ type upload struct {
 type uploadResult struct {
 	name   string
 	err    error
-	logger *logrus.Entry
+	logger *logrus.Entry // should be same as upload's logger. Used for logging errors at the end of upload.
 }
 
+// Takes copy of config!
 func newUpload(sec vconfig.Section,
-	vc vconfig.VConfig,
+	vc lvconfig,
 	logger *logrus.Logger,
 	flags cmdflags,
 	pgconn *postgresutils.PostgresProcess) (*upload, error) {
@@ -42,8 +39,7 @@ func newUpload(sec vconfig.Section,
 	name, err := sec.GetSingleValue("name", "") // name of process
 	if err != nil {
 		logger.WithFields(logrus.Fields{"section": sec.ToString()}).Error("Cannot resolve name of upload section")
-		err := errors.New("Cannot resolve name of upload section")
-		return nil, err
+		return nil, errors.New("Cannot resolve name of upload section")
 	}
 
 	// create new upload object and fill with data
@@ -58,31 +54,6 @@ func newUpload(sec vconfig.Section,
 	logging := logger.WithFields(logrus.Fields{"process": name}) // always write name of process in the log
 	logging.Info("Create upload object")
 	ul.m_logger = logging
-
-	// Source
-	source, err := ul.getTableFromSection("sourceTable")
-	if err != nil {
-		ul.m_logger.Error(err)
-	}
-	ul.m_destination = source
-
-	//Destination
-	destination, err := ul.getTableFromSection("destTable")
-	if err != nil {
-		ul.m_logger.Error(err)
-	}
-	ul.m_destination = destination
-
-	/*
-	   1. run upload or not
-	      if 1 then:
-	   2       source: define sets of uploads. For each set:
-	   3       source: copy data from source to file on server
-	   4       destinatio: copy file to destination server and upload to destation
-	   5 ...
-
-
-	*/
 
 	return ul, nil
 }
@@ -101,16 +72,83 @@ func (ul *upload) runUpload(result chan<- uploadResult) {
 
 	ul.m_logger.Info("Start upload")
 
-	time.Sleep(time.Second * time.Duration(20+rand.Intn(20)))
-	if rand.Intn(10) > 5 {
-		res.err = errors.New("me error, la-a-la")
-		fmt.Println("Error here")
-		result <- *res
-		return
-	}
-	time.Sleep(time.Second * time.Duration(20+rand.Intn(20)))
+    // create table source
+    tsName, err := ul.m_sec.GetSingleValue("sourceTable", "")
+    if err != nil {res.err = err; result <- *res; return}
+    tableSourceSections, err := ul.m_vconfig.GetSectionsByVar("table", "name", tsName)
+    if err != nil {res.err = err; result <- *res; return}
+    tableSource, err := NewTable(tableSourceSections[0], ul)
+    if err != nil {res.err = err; result <- *res; return}
 
-	ul.m_logger.Info("Finish upload without errors")
+    // get table description
+    tsDescription, err := tableSource.getTableDescription()
+    if err != nil {res.err = err; result <- *res; return}
+
+    // get time ranges
+    tsAvailableDataTimeRanges, err := tableSource.getAvailabeDataTimeRanges()
+    if err != nil {res.err = err; result <- *res; return}
+
+    // get destination table
+    tdName, err := ul.m_sec.GetSingleValue("destTable", "")
+    if err != nil {res.err = err; result <- *res; return}
+    tableDestSections, err := ul.m_vconfig.GetSectionsByVar("table", "name", tdName)
+    if err != nil {res.err = err; result <- *res; return}
+    tableDestination, err := NewTable(tableDestSections[0], ul)
+    if err != nil {res.err = err; result <- *res; return}
+
+    // check destination table with source description
+    ok, err := tableDestination.checkTable(tsDescription)
+    if err != nil {res.err = err; result <- *res; return}
+    if !ok {res.err = errors.New(fmt.Sprintf("Error while asseting destination table parameters")); result <- *res; return}
+
+    if len(tsAvailableDataTimeRanges) > 0 {
+        // for each time range
+        for _, timeRange := range tsAvailableDataTimeRanges {
+            // timeRange [startTime, endTime]
+            // get new or reset connection to source
+            if err := tableSource.connect(); err != nil{res.err = err; result <- *res; return}
+
+            // get new or reset connection to destination
+            if err := tableDestination.connect(); err != nil{res.err = err; result <- *res; return}
+
+            // receive data from source
+            data, err := tableSource.getData(timeRange)
+            if err != nil {res.err = err; result <- *res; return}
+
+            // close source and to cleanup
+            if err := tableSource.cleanup(); err != nil{res.err = err; result <- *res; return}
+
+            // change latestUploadedTimeRange in destination to startTime in timeRange
+            // upload data to destination
+            if err := tableDestination.uploadData(data); err != nil{res.err = err; result <- *res; return}
+            // change latestUploadedTimeRange in destination to endTime in timeRange
+
+            // close destination and do cleanup
+            if err := tableDestination.cleanup(); err != nil{res.err = err; result <- *res; return}
+        }
+    } else {
+        ul.m_logger.Info("No new data. Skip upload")
+    }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 	// once finished return result via channel
 	result <- *res
@@ -132,67 +170,4 @@ func (ul *upload) pingUpload(ping <-chan bool, abort <-chan bool, stop <-chan bo
 			time.Sleep(time.Millisecond * 10)
 		}
 	}
-}
-
-func (ul *upload) getTableFromSection(tableType string) (*table, error) {
-	tableName, err := ul.m_sec.GetSingleValue(tableType, "")
-	if err != nil {
-		return nil, err
-	}
-	sectons, err := ul.m_vconfig.GetSections("table")
-	if err != nil {
-		return nil, err
-	}
-
-	var tablesection *vconfig.Section
-	numtables := 0
-	for _, tsection := range sectons {
-		tname, _ := tsection.GetSingleValue("name", "")
-		//fmt.Println(fmt.Sprintf("'%v'", tname), tableName, tname == tableName)
-		if tname == tableName {
-			tablesection = tsection
-			numtables++
-		}
-	}
-	if numtables == 0 {
-		return nil, errors.New(fmt.Sprintf("Cannot find table section with name = '%v'", tableName))
-	}
-	if numtables > 1 {
-		return nil, errors.New(fmt.Sprintf("Multiple table sections with name = '%v'.", tableName))
-	}
-
-	hostName, err := tablesection.GetSingleValue("host", "")
-	if err != nil {
-		return nil, err
-	}
-
-	hosts, err := ul.m_vconfig.GetSections("host")
-	if err != nil {
-		return nil, err
-	}
-	numtables = 0
-	var host *vconfig.Section
-	for _, thost := range hosts {
-		hname, _ := thost.GetSingleValue("name", "")
-		//fmt.Println(hname, hostName, hname == hostName)
-		if hname == hostName {
-			host = thost
-			numtables++
-		}
-	}
-	if numtables == 0 {
-		return nil, errors.New(fmt.Sprintf("Cannot find host section with name = '%v'", hostName))
-	}
-	if numtables > 1 {
-		return nil, errors.New(fmt.Sprintf("Multiple host sections with name = '%v'.", hostName))
-	}
-
-	var tbl table
-
-	tbl, err = NewTable(*host, ul.m_pgconn)
-	if err != nil {
-		return nil, err
-	}
-
-	return &tbl, nil
 }
