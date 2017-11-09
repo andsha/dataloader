@@ -17,7 +17,7 @@ type upload struct {
 	m_vconfig     lvconfig
 	m_logger      *logrus.Entry
 	m_flags       cmdflags
-	m_pgconn      *postgresutils.PostgresProcess
+	m_pgconTimeRanges      *postgresutils.PostgresProcess
 	ping          chan bool
 	abortUpload   chan bool
 }
@@ -48,7 +48,7 @@ func newUpload(sec vconfig.Section,
 	ul.m_name = name
 	ul.m_vconfig = vc
 	ul.m_flags = flags
-	ul.m_pgconn = pgconn
+	ul.m_pgconTimeRanges = pgconn
 
 	// Modify logger to include name of the process
 	logging := logger.WithFields(logrus.Fields{"process": name}) // always write name of process in the log
@@ -72,38 +72,62 @@ func (ul *upload) runUpload(result chan<- uploadResult) {
 
 	ul.m_logger.Info("Start upload")
 
-    // create table source
+    // get source table
     tsName, err := ul.m_sec.GetSingleValue("sourceTable", "")
     if err != nil {res.err = err; result <- *res; return}
     tableSourceSections, err := ul.m_vconfig.GetSectionsByVar("table", "name", tsName)
     if err != nil {res.err = err; result <- *res; return}
     tableSource, err := NewTable(tableSourceSections[0], ul)
     if err != nil {res.err = err; result <- *res; return}
+    ul.m_logger.Debug("source table created")
+
 
     // get table description
     tsDescription, err := tableSource.getTableDescription()
-    if err != nil {res.err = err; result <- *res; return}
+    if err != nil {
+        if e := cleanup(&tableSource, nil); e != nil{res.err = errors.New(fmt.Sprintf("Error during cleaning-up process after '%v' error", err))} else{res.err = err}
+        result <- *res; return}
+    ul.m_logger.Debug("source table description received")
 
     // get time ranges
     tsAvailableDataTimeRanges, err := tableSource.getAvailabeDataTimeRanges()
-    if err != nil {res.err = err; result <- *res; return}
+    if err != nil {
+        if e := cleanup(&tableSource, nil); e != nil{res.err = errors.New(fmt.Sprintf("Error during cleaning-up process after '%v' error", err))} else{res.err = err}
+        result <- *res; return}
+
+    ul.m_logger.Debug("time ranges generated", tsAvailableDataTimeRanges)
 
     // get destination table
     tdName, err := ul.m_sec.GetSingleValue("destTable", "")
-    if err != nil {res.err = err; result <- *res; return}
+    if err != nil {
+        if e := cleanup(&tableSource, nil); e != nil{res.err = errors.New(fmt.Sprintf("Error during cleaning-up process after '%v' error", err))} else{res.err = err}
+        result <- *res; return}
     tableDestSections, err := ul.m_vconfig.GetSectionsByVar("table", "name", tdName)
-    if err != nil {res.err = err; result <- *res; return}
+    if err != nil {
+        if e := cleanup(&tableSource, nil); e != nil{res.err = errors.New(fmt.Sprintf("Error during cleaning-up process after '%v' error", err))} else{res.err = err}
+        result <- *res; return}
     tableDestination, err := NewTable(tableDestSections[0], ul)
-    if err != nil {res.err = err; result <- *res; return}
-
-    // check destination table with source description
-    ok, err := tableDestination.checkTable(tsDescription)
-    if err != nil {res.err = err; result <- *res; return}
-    if !ok {res.err = errors.New(fmt.Sprintf("Error while asseting destination table parameters")); result <- *res; return}
+    if err != nil {
+        if e := cleanup(&tableSource, nil); e != nil{res.err = errors.New(fmt.Sprintf("Error during cleaning-up process after '%v' error", err))} else{res.err = err}
+        result <- *res; return}
+    ul.m_logger.Debug("destination table created")
 
     if len(tsAvailableDataTimeRanges) > 0 {
+        // check destination table with source description
+        ok, err := tableDestination.checkTable(tsDescription)
+        if err != nil {
+            if e := cleanup(&tableSource, &tableDestination); e != nil{res.err = errors.New(fmt.Sprintf("Error during cleaning-up process after '%v' error", err))} else{res.err = err}
+            result <- *res; return}
+        if !ok {res.err = errors.New(fmt.Sprintf("Error while asseting destination table parameters")); result <- *res; return}
+
+        ul.m_logger.Debug("destination table was checked")
+
         // for each time range
         for _, timeRange := range tsAvailableDataTimeRanges {
+            start := timeRange[0]
+            end := timeRange[1]
+            ul.m_logger.Info(fmt.Sprintf("Uploading for [%v, %v] time range", start, end))
+
             // timeRange [startTime, endTime]
             // get new or reset connection to source
             if err := tableSource.connect(); err != nil{res.err = err; result <- *res; return}
@@ -115,43 +139,46 @@ func (ul *upload) runUpload(result chan<- uploadResult) {
             data, err := tableSource.getData(timeRange)
             if err != nil {res.err = err; result <- *res; return}
 
-            // close source and to cleanup
-            if err := tableSource.cleanup(); err != nil{res.err = err; result <- *res; return}
 
-            // change latestUploadedTimeRange in destination to startTime in timeRange
+
+            // Update time ranges table
+            if err := tableSource.updateTimeRanges(start, end, true); err != nil {
+                if e := cleanup(nil, &tableDestination); e != nil{res.err = errors.New(fmt.Sprintf("Error during cleaning-up process after '%v' error", err))} else{res.err = err}
+                result <- *res; return}
+
             // upload data to destination
-            if err := tableDestination.uploadData(data); err != nil{res.err = err; result <- *res; return}
-            // change latestUploadedTimeRange in destination to endTime in timeRange
+            err = tableDestination.uploadData(data)
+            if err != nil {
+                if e := cleanup(nil, &tableDestination); e != nil{res.err = errors.New(fmt.Sprintf("Error during cleaning-up process after '%v' error", err))} else{res.err = err}
+                result <- *res; return}
 
-            // close destination and do cleanup
-            if err := tableDestination.cleanup(); err != nil{res.err = err; result <- *res; return}
+            // change latestUploadedTimeRange in destination to endTime in timeRange
+            if err := tableSource.updateTimeRanges(start, end, false); err != nil {
+                if e := cleanup(&tableSource, &tableDestination); e != nil{res.err = errors.New(fmt.Sprintf("Error during cleaning-up process after '%v' error", err))} else{res.err = err}
+                result <- *res; return}
+
+            ul.m_logger.Info(fmt.Sprintf("Uploading for [%v, %v] time range finished", start, end))
+
         }
     } else {
         ul.m_logger.Info("No new data. Skip upload")
     }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    // close source and destination and do cleanup
+    if err := cleanup(&tableSource, &tableDestination); err != nil{res.err = errors.New(fmt.Sprintf("Error during cleaning-up process after '%v' error", err)); result <- *res; return}
 
 	// once finished return result via channel
 	result <- *res
+}
+
+func cleanup(ts *table, td *table) error {
+    if ts != nil{
+        if err := (*ts).cleanup(); err != nil {return err}
+    }
+    if td != nil{
+        if err := (*td).cleanup(); err != nil {return err}
+    }
+    return nil
 }
 
 func (ul *upload) pingUpload(ping <-chan bool, abort <-chan bool, stop <-chan bool) {

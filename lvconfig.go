@@ -135,7 +135,7 @@ func (lvc *lvconfig) createSourceTableSection(usection *vconfig.Section, table s
     schema, err := usection.GetSingleValue("db", "")
     if err != nil {return nil, err}
     sec.SetValues("schema", []string{schema})
-    name := []string{fmt.Sprintf("%v.%v", schema, table)}
+    name := []string{fmt.Sprintf("%v_%v", schema, table)}
     sec.SetValues("name", name)
     host, _ := usection.GetSingleValue("sourceHost", "")
     sec.SetValues("host", []string{host})
@@ -174,7 +174,7 @@ func (lvc *lvconfig) createSourceTableSection(usection *vconfig.Section, table s
 
 func (lvc *lvconfig) createDestTableSection(usection *vconfig.Section, table string, pgprocess *postgresutils.PostgresProcess) (*vconfig.Section, error) {
     sec := vconfig.NewSection("table")
-    schema, err := usection.GetSingleValue("db", "")
+    schema, err := usection.GetSingleValue("destSchema", "")
     if err != nil {return nil, err}
     sec.SetValues("schema", []string{schema})
     name := []string{fmt.Sprintf("bfd_%v_%v", schema, table)}
@@ -195,11 +195,11 @@ func (lvc *lvconfig) createDestTableSection(usection *vconfig.Section, table str
 
 func (lvc *lvconfig) createUploadSection(usection *vconfig.Section, table string) (*vconfig.Section, error){
     sec := vconfig.NewSection("upload")
-    schema, err := usection.GetSingleValue("db", "")
-    if err != nil {return nil, err}
+    schema, _ := usection.GetSingleValue("db", "")
+    destSchema, _ := usection.GetSingleValue("destSchema", "")
     sec.SetValues("name", []string{fmt.Sprintf("from_%v_%v_to_bfd", schema, table)})
     sec.SetValues("sourceTable", []string{fmt.Sprintf("%v_%v", schema, table)})
-    sec.SetValues("destTable", []string{fmt.Sprintf("bfd_%v_%v", schema, table)})
+    sec.SetValues("destTable", []string{fmt.Sprintf("bfd_%v_%v", destSchema, table)})
     sec.SetValues("fieldMap", []string{"sourceFields"})
     deleteFile, _ := usection.GetSingleValue("deleteFile", "False")
     sec.SetValues("deleteFile", []string{deleteFile})
@@ -211,7 +211,8 @@ func (lvc *lvconfig) createUploadSection(usection *vconfig.Section, table string
                                     "doCheck", "doCheckChecksum", "checkDays",
                                     "possibleCheckDiscrepancy",  "checkSourceQuery",
                                     "checkDestQuery", "daysToLoad"}{
-        if v, _ := sec.GetSingleValue(field, ""); v != "" {sec.SetValues(field, []string{v})}
+        //fmt.Println(field)
+        if v, _ := usection.GetSingleValue(field, ""); v != "" {sec.SetValues(field, []string{v})}
     }
     return sec, nil
 }

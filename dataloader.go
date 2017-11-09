@@ -52,7 +52,13 @@ func main() {
 	}
 	defer logfile.Close()
 	logging.Out = logfile
-	logging.SetLevel(logrus.InfoLevel) // set default level
+	// set default level
+    if flags.verbose {
+        logging.SetLevel(logrus.DebugLevel)
+    } else {
+         logging.SetLevel(logrus.InfoLevel)
+    }
+
 	logging.Info("Start")
 
 	// Iniialize Errors
@@ -98,6 +104,8 @@ func main() {
 		logging.Fatal(err)
 	}
 
+    //fmt.Println(config.ToString())
+
 	// history table
 	schema, err := lsec.GetSingleValue("schema", "")
 	if err != nil {
@@ -106,10 +114,10 @@ func main() {
 
 	sql := fmt.Sprintf(`
         CREATE TABLE IF NOT EXISTS %v."destTableTimeRanges"(
-            destinationTable  varchar(255),
-            lastModifiedTime  timestamp,
-            FromDate          timestamp,
-            ToDate            timestamp
+            "destinationTable"  varchar(255),
+            "lastModifiedTime"  timestamp,
+            "FromDate"          timestamp,
+            "ToDate"            timestamp
         )
     `, schema)
 	_, err = pgconnWriteReports.Run(sql)
