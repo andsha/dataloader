@@ -18,8 +18,95 @@ type pgtable struct {
 
 
 
-func (t *pgtable) getTableDescription() ([]string, error){
-    return []string{""}, nil
+func (t *pgtable) getTableDescription() ([]tableDescription, error){
+    var description []tableDescription
+    var err error
+    description, err = t.getGenericTableDescription()
+    if err != nil {return nil, err}
+    if description != nil {return description, nil}
+    sourceTableName, _ := t.upload.m_sec.GetSingleValue("sourceTable", "")
+    sourceTables, _ := t.upload.m_vconfig.GetSectionsByVar("table", "name", sourceTableName)
+    schema, _ := sourceTables[0].GetSingleValue("schema", "")
+    table, _ := sourceTables[0].GetSingleValue("name", "")
+
+    // list of excluded fields
+    var excludedFields []string
+    efs, _ := t.tablesection.GetSingleValue("excludedFields", "")
+    if efs != "" {
+        for _, ef := range strings.Split(efs, ",") {
+            excludedField := strings.Trim(ef, " ")
+            excludedFields = append(excludedFields, excludedField)
+        }
+    }
+
+    // List of fields in source table
+    sql := fmt.Sprintf(`SELECT column_name, data_type, character_maximum_length
+                        FROM information_schema.columns
+                        WHERE table_schema = '%v' and table_name = '%v'
+    `, schema, table)
+    res, err := t.pgprocess.Run(sql)
+    if err != nil {return nil, err}
+
+    for _, fieldline := range res {
+        var td tableDescription
+        s, ok := fieldline[0].(string)
+        if !ok {return nil, errors.New(fmt.Sprintf("Could no extract field name '%v' from table", fieldline[0]))}
+
+        // if in excluded field then do not include
+        for _, ef := range excludedFields {
+            if ef == s {continue}
+        }
+        td.sourceName = s
+        s, ok = fieldline[1].(string)
+        if !ok {return nil, errors.New(fmt.Sprintf("Could no extract field name '%v' from table", fieldline[1]))}
+        td.sourceType = s
+
+        if td.sourceType == "varchar" {
+            s, ok = fieldline[1].(string)
+            if !ok {return nil, errors.New(fmt.Sprintf("Could no extract field name '%v' from table", fieldline[2]))}
+            td.sourceType = fmt.Sprintf("varchar(%v)", s)
+        }
+        description = append(description,td)
+    }
+
+    // Get list of primary keys
+    sql = fmt.Sprintf(`
+        SELECT kc.column_name
+        FROM information_schema.key_column_usage kc
+        WHERE
+            kc.constraint_name like '%v'
+            and kc.table_schema = '%v'
+            and  kc.table_name = '%v'
+    `, "%_pkey", schema, table)
+    res, err = t.pgprocess.Run(sql)
+    if err != nil {return nil, err}
+
+    for _, pkey := range res[0] {
+        for _, td := range description {
+            pk, ok := pkey.(string)
+            if !ok {return nil, errors.New(fmt.Sprintf("Cannot exctract primary key field name '%v' from table", pkey))}
+            if pk == td.sourceName {
+                td.isPKey = true
+            }
+        }
+    }
+
+    // MD5
+    if md5s, _ := t.tablesection.GetSingleValue("addMD5ToFields", ""); md5s != "" {
+        for _, mdf := range strings.Split(md5s, ",") {
+            md5 := strings.Trim(mdf, " ")
+            for _, td := range description {
+                if md5 == td.destName {
+                    td.md5 = true
+                }
+            }
+        }
+    }
+
+
+
+
+    return description, nil
 }
 
 // get time ranges for available data in source.
@@ -128,7 +215,15 @@ func (t *pgtable) getAvailabeDataTimeRanges() ([][]time.Time, error) {
         if force {
             start = end.AddDate(0,0,-days)
         } else {
-            if beginning.After(uploadTime) {start = beginning.AddDate(0,0,-days)} else {start = uploadTime.AddDate(0,0,-days)}
+            if !uploadTime.Before(latestAvailableTime) {
+                //t := var []time.Time{}
+                return [][]time.Time{}, nil
+            }
+            if beginning.After(uploadTime) {
+                start = beginning.AddDate(0,0,-days)
+            } else {
+                start = uploadTime.AddDate(0,0,-days)
+            }
         }
 
         if start.After(end) {return nil, errors.New(fmt.Sprintf("Start date after End date for table %v", tablename))}
@@ -158,7 +253,7 @@ func (t *pgtable) getAvailabeDataTimeRanges() ([][]time.Time, error) {
     return timeRanges, nil
 }
 
-func (t *pgtable) checkTable(descrition []string) (bool, error){
+func (t *pgtable) checkTable(descrition []tableDescription) (bool, error){
     return true, nil
 }
 

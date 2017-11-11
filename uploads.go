@@ -28,6 +28,15 @@ type uploadResult struct {
 	logger *logrus.Entry // should be same as upload's logger. Used for logging errors at the end of upload.
 }
 
+type tableDescription struct {
+    sourceName string
+    destName string
+    sourceType string
+    destType string
+    isPKey bool
+    md5 bool
+}
+
 // Takes copy of config!
 func newUpload(sec vconfig.Section,
 	vc lvconfig,
@@ -81,6 +90,8 @@ func (ul *upload) runUpload(result chan<- uploadResult) {
     if err != nil {res.err = err; result <- *res; return}
     ul.m_logger.Debug("source table created")
 
+    // get new or reset connection to source
+    if err := tableSource.connect(); err != nil{res.err = err; result <- *res; return}
 
     // get table description
     tsDescription, err := tableSource.getTableDescription()
@@ -89,7 +100,9 @@ func (ul *upload) runUpload(result chan<- uploadResult) {
         result <- *res; return}
     ul.m_logger.Debug("source table description received")
 
-    // get time ranges
+
+
+     // get time ranges
     tsAvailableDataTimeRanges, err := tableSource.getAvailabeDataTimeRanges()
     if err != nil {
         if e := cleanup(&tableSource, nil); e != nil{res.err = errors.New(fmt.Sprintf("Error during cleaning-up process after '%v' error", err))} else{res.err = err}

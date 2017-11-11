@@ -3,15 +3,17 @@ package main
 import (
 	"errors"
     "fmt"
+    "strings"
     "time"
 
 	"github.com/andsha/vconfig"
 )
 
 type table interface {
-    getTableDescription() ([]string, error)
+    getGenericTableDescription() ([]tableDescription, error)
+    getTableDescription() ([]tableDescription, error)
     getAvailabeDataTimeRanges() ([][]time.Time, error)
-    checkTable(descrition []string) (bool, error)
+    checkTable(descrition []tableDescription) (bool, error)
     connect() error
     cleanup() error
     disconnect() error
@@ -45,4 +47,55 @@ func NewTable(tsec *vconfig.Section, ul *upload) (table, error) {
 	default:
 		return nil, errors.New(fmt.Sprintf("No such type of table %v", tType))
 	}
+}
+
+func (gt *generictable) getGenericTableDescription () ([]tableDescription, error) {
+    var description []tableDescription
+    if fieldMap, _ := gt.upload.m_sec.GetSingleValue("fieldMap", ""); fieldMap != "" {
+        // get name of destination table
+        destTableName, _ := gt.upload.m_sec.GetSingleValue("destTable", "")
+
+        //get destination table section
+        destinations, _ := gt.upload.m_vconfig.GetSectionsByVar("table", "name", destTableName)
+
+        //Check Fields in destination table
+        if fields, _ :=  destinations[0].GetSingleValue("fields", ""); fields != "" {
+            maps := strings.Split(fieldMap, ",")
+
+            // extract source and dest field names
+            for _, fmap := range maps {
+                var d tableDescription
+                s := strings.Split(fmap, ":")
+                d.sourceName = strings.Trim(s[0], " ")
+                d.destName = strings.Trim(s[1], " ")
+
+
+                // extract destination field types
+                for _, field := range strings.Split(fields, ",") {
+                    s := strings.Split(field, ":")
+                    destName := strings.Trim(s[0], " ")
+                    if destName == d.destName {
+                        d.destType = strings.Trim(s[1], " ")
+                    }
+                }
+
+                // extract destination field primary keys
+                if pkeys, _ := destinations[0].GetSingleValue("primary_key", ""); pkeys != "" {
+                    for _, pk := range strings.Split(pkeys, ",") {
+                        pkey := strings.Trim(pk, " ")
+                        if pkey == d.destName {
+                            d.isPKey = true
+                        }
+                    }
+                }
+
+                description = append(description, d)
+            }
+        } else {
+            return nil, errors.New("Cannot find field variable in upload (upload has FieldMap)")
+        }
+
+    }
+
+    return description, nil
 }
