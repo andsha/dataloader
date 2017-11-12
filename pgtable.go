@@ -5,9 +5,10 @@ package main
 import(
     "errors"
     "fmt"
-    "time"
+    "os/exec"
     "strconv"
     "strings"
+    "time"
     "github.com/andsha/postgresutils"
 )
 
@@ -16,18 +17,189 @@ type pgtable struct {
     pgprocess *postgresutils.PostgresProcess
 }
 
+func (t *pgtable) checkTable(description []tableDescription) error{
+    if err := t.connect(); err != nil {return err}
+    defer t.disconnect()
 
+    descriptionr := make([]*tableDescription, len(description))
+    for idx, _ := range description {
+        descriptionr[idx] = &description[idx]
+    }
+
+    for _, td := range descriptionr {
+        if td.destName == "" {
+            td.destName = td.sourceName
+        }
+        if td.destType == "" {
+            td.destType = td.sourceType
+        }
+    }
+
+    t.upload.m_logger.Debug(description)
+
+    destTableName, _ := t.upload.m_sec.GetSingleValue("destTable", "")
+    destTables, _ := t.upload.m_vconfig.GetSectionsByVar("table", "name", destTableName)
+    schema, _ := destTables[0].GetSingleValue("schema", "")
+    table, _ := destTables[0].GetSingleValue("table", "")
+
+    // check if dest table exists in destination
+    sql := fmt.Sprintf(`SELECT 1 FROM information_schema.tables
+           WHERE table_schema = '%v' AND table_name = '%v'
+    `, schema, table)
+    res, err := t.pgprocess.Run(sql)
+    if err != nil {return err}
+
+    if len(res) == 0 { // if table does not exist in destination; create it
+        fields := ""
+        pkey := ""
+        for _, td := range descriptionr {
+            fields = fmt.Sprintf(`%v, "%v" %v`, fields, td.destName, td.destType)
+            if td.isPKey {
+                pkey = fmt.Sprintf("%v, %v", pkey, td.destName)
+            }
+        }
+
+        if pkey != "" {
+            pkey = fmt.Sprintf(", primary key (%v)", pkey[1:])
+        }
+
+        sql := fmt.Sprintf(`CREATE TABLE "%v"."%v" (%v%v)
+        `, schema, table, fields[1:], pkey)
+        if _, err := t.pgprocess.Run(sql); err != nil {return err}
+        return nil
+    }
+
+    // if table does exists in destination, check it
+    // List of fields in destination table
+    sql = fmt.Sprintf(`SELECT column_name, data_type, character_maximum_length, numeric_precision, numeric_scale
+                        FROM information_schema.columns
+                        WHERE table_schema = '%v' and table_name = '%v'
+                        `, schema, table)
+    res, err = t.pgprocess.Run(sql)
+    if err != nil {return err}
+
+    for _, td := range descriptionr {
+        found := false
+        for _, col := range res {
+            colName, _ := col[0].(string)
+            // if col exists in destination
+            if colName == td.destName {
+                found = true
+                colType, _ := col[1].(string)
+                // if column type not same as in destination
+                if colType == td.destType {
+                    continue
+                }
+                ctype := td.destType
+                if strings.HasPrefix(td.destType, "character varying") && colType == "character varying" {
+                    charLength, _ := strconv.Atoi(td.destType[8:len(td.destType)-2])
+                    colCharLengths, _ := col[2].(string)
+                    colCharLength, _ := strconv.Atoi(colCharLengths)
+                    if charLength > colCharLength {
+                        ctype = fmt.Sprintf("character varying(%v)", charLength)
+                    }
+                }
+                if strings.HasPrefix(td.destType, "numeric") && colType == "numeric" {
+                    nps := td.destType[9:len(td.destType)-2]
+                    np, _ := col[3].(int)
+                    ns, _ := col[4].(int)
+                    if nps != fmt.Sprintf("%v, %v", np, ns) {
+                        ctype = td.destType
+                    }
+
+                }
+                sql := fmt.Sprintf(`ALTER TABLE "%v"."%v"
+                                    ALTER COLUMN "%v" TYPE %v
+                                    `, schema, table, colName, ctype)
+                if _, err := t.pgprocess.Run(sql); err != nil {return err}
+            }
+        }
+        // if not found in destination - create new column
+        if !found {
+            sql := fmt.Sprintf(`ALTER TABLE "%v"."%v" ADD COLUMN "%v" %v`, schema, table, td.destName, td.destType)
+            if _, err := t.pgprocess.Run(sql); err != nil {return err}
+        }
+    }
+
+    // Check Primary keys
+
+    sql = fmt.Sprintf(`
+        SELECT kc.column_name
+        FROM information_schema.key_column_usage kc
+        WHERE
+            kc.constraint_name like '%v'
+            and kc.table_schema = '%v'
+            and  kc.table_name = '%v'
+        `, "%_pkey", schema, table)
+    res, err = t.pgprocess.Run(sql)
+    if err != nil {return err}
+
+    for _, td := range descriptionr {
+        exists := false
+
+        for _, pkey := range res{
+            pkname, _ := pkey[0].(string)
+            t.upload.m_logger.Debug(pkname, td.destName, td.isPKey, td.isPKey && td.destName == pkname)
+            if !td.isPKey {exists = true} else {
+                if td.destName == pkname {exists = true}
+            }
+
+        }
+        //t.upload.m_logger.Debug(exists)
+        if !exists {
+            t.upload.m_logger.Debug("DROPPING PRIMARY KEY")
+            // get name of primary key
+            sql := fmt.Sprintf(`SELECT constraint_name
+                                FROM information_schema.key_column_usage
+                                WHERE constraint_name like '%v' and
+                                table_schema = '%v' and
+                                table_name = '%v'
+                                `, "%_pkey", schema, table)
+            res, err := t.pgprocess.Run(sql)
+            if err != nil {return err}
+
+            if len(res) > 0 {
+                pkeyName, _ := res[0][0].(string)
+                // delete primery key
+                sql = fmt.Sprintf(`ALTER TABLE "%v"."%v"
+                                   DROP CONSTRAINT "%v"
+                                   `, schema, table, pkeyName)
+                if _, err := t.pgprocess.Run(sql); err != nil {return err}
+            }
+
+            newpk := ""
+
+            for _, td1 := range descriptionr {
+                t.upload.m_logger.Debug(td1)
+                if td1.isPKey {
+                    newpk = fmt.Sprintf(`%v, "%v"`,  newpk, td1.destName)
+                }
+            }
+            sql = fmt.Sprintf(`ALTER TABLE "%v"."%v"
+                               ADD PRIMARY KEY (%v)
+                               `, schema, table, newpk[1:])
+            if _, err := t.pgprocess.Run(sql); err != nil {return err}
+            return nil
+        }
+    }
+
+    return nil
+}
 
 func (t *pgtable) getTableDescription() ([]tableDescription, error){
+    if err := t.connect(); err != nil {return nil, err}
+    defer t.disconnect()
+
     var description []tableDescription
     var err error
     description, err = t.getGenericTableDescription()
     if err != nil {return nil, err}
+
     if description != nil {return description, nil}
     sourceTableName, _ := t.upload.m_sec.GetSingleValue("sourceTable", "")
     sourceTables, _ := t.upload.m_vconfig.GetSectionsByVar("table", "name", sourceTableName)
     schema, _ := sourceTables[0].GetSingleValue("schema", "")
-    table, _ := sourceTables[0].GetSingleValue("name", "")
+    table, _ := sourceTables[0].GetSingleValue("table", "")
 
     // list of excluded fields
     var excludedFields []string
@@ -39,56 +211,81 @@ func (t *pgtable) getTableDescription() ([]tableDescription, error){
         }
     }
 
+    // primary keys
+    pkeys := []string{}
+    if pks, _ := t.tablesection.GetSingleValue("primary_key", ""); pks != "" {
+        for _, pk := range strings.Split(pks, ",") {
+            primary_key := strings.Trim(pk, " ")
+            pkeys = append(pkeys, primary_key)
+        }
+        t.upload.m_logger.Debug(pkeys)
+    } else {
+        // Get list of primary keys
+        sql := fmt.Sprintf(`
+            SELECT kc.column_name
+            FROM information_schema.key_column_usage kc
+            WHERE
+                kc.constraint_name like '%v'
+                and kc.table_schema = '%v'
+                and  kc.table_name = '%v'
+        `, "%_pkey", schema, table)
+        t.upload.m_logger.Debug(sql)
+        res, err := t.pgprocess.Run(sql)
+        if err != nil {return nil, err}
+
+        for _, pkey := range res {
+           pk, ok := pkey[0].(string)
+            if !ok {return nil, errors.New(fmt.Sprintf("Cannot exctract primary key field name '%v' from table", pkey))}
+            pkeys = append(pkeys, pk)
+        }
+    }
+
     // List of fields in source table
-    sql := fmt.Sprintf(`SELECT column_name, data_type, character_maximum_length
+    sql := fmt.Sprintf(`SELECT column_name, data_type, character_maximum_length, numeric_precision, numeric_scale
                         FROM information_schema.columns
                         WHERE table_schema = '%v' and table_name = '%v'
     `, schema, table)
     res, err := t.pgprocess.Run(sql)
+    t.upload.m_logger.Debug(sql, "\n", res)
     if err != nil {return nil, err}
 
     for _, fieldline := range res {
         var td tableDescription
+        t.upload.m_logger.Debug(fieldline)
         s, ok := fieldline[0].(string)
         if !ok {return nil, errors.New(fmt.Sprintf("Could no extract field name '%v' from table", fieldline[0]))}
 
         // if in excluded field then do not include
+        donotinclude := false
         for _, ef := range excludedFields {
-            if ef == s {continue}
+            if ef == s {donotinclude = true}
         }
+        if donotinclude {continue}
         td.sourceName = s
         s, ok = fieldline[1].(string)
-        if !ok {return nil, errors.New(fmt.Sprintf("Could no extract field name '%v' from table", fieldline[1]))}
+        if !ok {return nil, errors.New(fmt.Sprintf("Could no extract field type '%v' from table", fieldline[1]))}
         td.sourceType = s
 
-        if td.sourceType == "varchar" {
-            s, ok = fieldline[1].(string)
-            if !ok {return nil, errors.New(fmt.Sprintf("Could no extract field name '%v' from table", fieldline[2]))}
-            td.sourceType = fmt.Sprintf("varchar(%v)", s)
+        if td.sourceType == "character varying" {
+            s, ok := fieldline[2].(int64)
+            if !ok {return nil, errors.New(fmt.Sprintf("Could no extract varchar length '%v' from table", fieldline[2]))}
+            td.sourceType = fmt.Sprintf("character varying(%v)", s)
         }
-        description = append(description,td)
-    }
 
-    // Get list of primary keys
-    sql = fmt.Sprintf(`
-        SELECT kc.column_name
-        FROM information_schema.key_column_usage kc
-        WHERE
-            kc.constraint_name like '%v'
-            and kc.table_schema = '%v'
-            and  kc.table_name = '%v'
-    `, "%_pkey", schema, table)
-    res, err = t.pgprocess.Run(sql)
-    if err != nil {return nil, err}
+        if td.sourceType == "numeric" {
+            np, ok := fieldline[3].(int64)
+            if !ok {return nil, errors.New(fmt.Sprintf("Could no extract numeric precision '%v' from table", fieldline[3]))}
+            ns, ok := fieldline[4].(int64)
+            if !ok {return nil, errors.New(fmt.Sprintf("Could no extract numeric precision '%v' from table", fieldline[4]))}
+            td.sourceType = fmt.Sprintf("numeric(%v, %v)", np, ns)
+        }
 
-    for _, pkey := range res[0] {
-        for _, td := range description {
-            pk, ok := pkey.(string)
-            if !ok {return nil, errors.New(fmt.Sprintf("Cannot exctract primary key field name '%v' from table", pkey))}
-            if pk == td.sourceName {
+        for _, pkey := range pkeys {
+            if pkey == td.sourceName {
                 td.isPKey = true
             }
         }
+        description = append(description,td)
     }
 
     // MD5
@@ -97,21 +294,25 @@ func (t *pgtable) getTableDescription() ([]tableDescription, error){
             md5 := strings.Trim(mdf, " ")
             for _, td := range description {
                 if md5 == td.destName {
-                    td.md5 = true
+                    var newtd tableDescription
+                    newtd.sourceName = fmt.Sprintf(`md5("%v")`, md5)
+                    newtd.destName = fmt.Sprintf(`md5(%v)`, toLowerAndNoPrefix(td.destName))
+                    newtd.md5 = true
+                    newtd.sourceType = "text"
+                    description = append(description, newtd)
                 }
             }
         }
     }
-
-
-
-
+    t.upload.m_logger.Debug("Description:", description)
     return description, nil
 }
 
 // get time ranges for available data in source.
 // will only be used for source
 func (t *pgtable) getAvailabeDataTimeRanges() ([][]time.Time, error) {
+    if err := t.connect(); err != nil {return nil, err}
+    defer t.disconnect()
     // name for timeRanges table
     destTableName, _ := t.upload.m_sec.GetSingleValue("destTable", "")
 
@@ -129,7 +330,6 @@ func (t *pgtable) getAvailabeDataTimeRanges() ([][]time.Time, error) {
     res, err := t.upload.m_pgconTimeRanges.Run(sql)
     if err != nil {return nil, err}
     if len(res) > 1 {
-
         return nil, errors.New(fmt.Sprintf("There is more than one entry for table %v in time ranges table", tablename))
     }
     uploadTime := time.Date(2007, time.January, 01, 0, 0, 0, 0, time.UTC)
@@ -253,11 +453,11 @@ func (t *pgtable) getAvailabeDataTimeRanges() ([][]time.Time, error) {
     return timeRanges, nil
 }
 
-func (t *pgtable) checkTable(descrition []tableDescription) (bool, error){
-    return true, nil
-}
-
 func (t *pgtable) connect() error {
+    // disconnect
+    if err := t.disconnect(); err != nil {return err}
+
+    //reconnect
     host, err := t.tablesection.GetSingleValue("host", "")
     if err != nil {return err}
     pgprocess, err := t.upload.m_vconfig.getPGConn(host)
@@ -283,8 +483,73 @@ func (t *pgtable) cleanup() error {
 }
 
 func (t *pgtable) getData([]time.Time) ([]byte, error) {
+    res, err := executeBashCmd("sleep 60", t.upload.abortUpload)
+    if err != nil {
+        return nil, err
+    }
+
+    _=res
+
     return nil, nil
 }
+
+func executeBashCmd(command string, abort <-chan bool) (string, error) {
+    // create command
+    cmd := exec.Command("sh", "-c", command)
+
+    //get stdout to read result
+    stdout, err := cmd.StdoutPipe()
+    if err != nil {
+        return "", err
+    }
+
+    // create buffer for result
+    res := make([]byte, 1024)
+
+    // start command
+    if err := cmd.Start(); err != nil {
+        return "", err
+    }
+
+    // get pid
+    pid := cmd.Process.Pid
+
+    // check that executing process is still alive. kill if terminated
+    go func(){
+        for {
+            pingcmd := fmt.Sprintf("ps -p %v -o stat | grep -v STAT", pid)
+            ping, _ := exec.Command("sh", "-c", pingcmd).Output()
+            if string(ping[0:1]) == "T" {
+                cmd.Process.Kill()
+                return
+            }
+            select {
+                case <-abort :
+                    cmd.Process.Kill()
+                    return
+                default:
+            }
+            time.Sleep(time.Second * 60)
+        }
+    }()
+
+
+
+    // read any results into buffer
+    _, errout := stdout.Read(res)
+
+    //Wait for command to finish
+    if err := cmd.Wait(); err != nil {
+        return "", err
+    }
+
+    // deal with result
+    return string(res), errout
+
+
+}
+
+
 
 func (t * pgtable) updateTimeRanges (start time.Time, end time.Time, beforeUpload bool) error {
     // name for timeRanges table

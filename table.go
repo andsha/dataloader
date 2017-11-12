@@ -13,7 +13,7 @@ type table interface {
     getGenericTableDescription() ([]tableDescription, error)
     getTableDescription() ([]tableDescription, error)
     getAvailabeDataTimeRanges() ([][]time.Time, error)
-    checkTable(descrition []tableDescription) (bool, error)
+    checkTable(descrition []tableDescription) error
     connect() error
     cleanup() error
     disconnect() error
@@ -51,7 +51,9 @@ func NewTable(tsec *vconfig.Section, ul *upload) (table, error) {
 
 func (gt *generictable) getGenericTableDescription () ([]tableDescription, error) {
     var description []tableDescription
+    gt.upload.m_logger.Debug(gt.upload.m_sec)
     if fieldMap, _ := gt.upload.m_sec.GetSingleValue("fieldMap", ""); fieldMap != "" {
+        gt.upload.m_logger.Debug(fieldMap)
         // get name of destination table
         destTableName, _ := gt.upload.m_sec.GetSingleValue("destTable", "")
 
@@ -80,7 +82,7 @@ func (gt *generictable) getGenericTableDescription () ([]tableDescription, error
                 }
 
                 // extract destination field primary keys
-                if pkeys, _ := destinations[0].GetSingleValue("primary_key", ""); pkeys != "" {
+                if pkeys, _ := destinations[0].GetSingleValue("PrimaryKey", ""); pkeys != "" {
                     for _, pk := range strings.Split(pkeys, ",") {
                         pkey := strings.Trim(pk, " ")
                         if pkey == d.destName {
@@ -92,7 +94,7 @@ func (gt *generictable) getGenericTableDescription () ([]tableDescription, error
                 description = append(description, d)
             }
         } else {
-            return nil, errors.New("Cannot find field variable in upload (upload has FieldMap)")
+            return nil, nil
         }
 
     }

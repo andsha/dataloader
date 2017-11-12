@@ -32,7 +32,8 @@ func (flags *cmdflags) parseCmdFlags() {
 	flag.StringVar(&flags.config, "config", "", "path to the file that describes configuration")
 	flag.BoolVar(&flags.force, "force", false, "force report running")
 	flag.IntVar(&flags.days, "days", 1, "How many days to sync...")
-	flag.IntVar(&flags.threads, "threads", 5, "How many threads to run...")
+	//TODO change variable threads to instances or something else
+    flag.IntVar(&flags.threads, "threads", 5, "How many threads to run...")
 	flag.StringVar(&flags.todate, "todate", "", "generate feed for 'todate'")
 	flag.Parse()
 }
@@ -42,14 +43,13 @@ func main() {
 	// Get command line flags
 	flags := new(cmdflags)
 	flags.parseCmdFlags()
-	fmt.Println(flags)
-
+	//fmt.Println(flags)
 	//Initialize logging
+    //TODO log file get from command line
+    //TODO do not use log.Fatal, because after script done we have to send email with errors
 	var logging = logrus.New()
 	logfile, err := os.OpenFile("/tmp/log", os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0666)
-	if err != nil {
-		panic(err)
-	}
+	if err != nil {panic(err)}
 	defer logfile.Close()
 	logging.Out = logfile
 	// set default level
@@ -83,6 +83,7 @@ func main() {
 	if err != nil {
 		logging.Fatal(err)
 	}
+    //TODO section is not with secure password but with info how to decode password
 	pwdSection, err := config.GetSections("SECURE PASSWORD")
 	if err != nil {
 		logging.Fatal(err)
@@ -97,6 +98,7 @@ func main() {
 	if err != nil {
 		logging.Fatal(err)
 	}
+    //TODO check that defer happens if Fatal called
 	defer pgconnWriteReports.CloseDB()
 
 	// update config by expansion of dbUploads
@@ -104,7 +106,7 @@ func main() {
 		logging.Fatal(err)
 	}
 
-    //fmt.Println(config.ToString())
+    fmt.Println(config.ToString())
 
 	// history table
 	schema, err := lsec.GetSingleValue("schema", "")
@@ -134,7 +136,8 @@ func main() {
 	uploads := make(map[int][]*upload)
 	//numUploads := 0
 
-	// create queue of uploads according to priority
+	// create queue of uploads according to queue
+    //TODO add priority within the queue
 	for _, uploadSection := range usections {
 		// we copy current config to new upload object, thus all futher modifications
 		// won't be propagated to upload
@@ -153,6 +156,7 @@ func main() {
 		}
 	}
 
+    //TODO these are not priorities but queue (just to avid confusion)
 	priorities := make([]int, 0)
 	for p := range uploads {
 		priorities = append(priorities, p)
@@ -173,10 +177,10 @@ func main() {
 	done := make(chan bool)
 
 	// create ticker for pinging running uploads
-	ticker := time.NewTicker(time.Second * 10)
+	ticker := time.NewTicker(time.Second * 60)
 
 	//start goroutine for checking syscalls to catch kill calls
-	kill := make(chan os.Signal, 3)
+	kill := make(chan os.Signal, 10)
 	signal.Notify(kill, os.Interrupt, syscall.SIGKILL, syscall.SIGINT, syscall.SIGTSTP, syscall.SIGTERM)
 
 	// start goroutine for checking results
@@ -184,6 +188,7 @@ func main() {
 
 	// Start runUpload for each upload from priority map. maximum number of
 	// routines is defined in command line.
+    // TODO priority here is queue
 	for _, priority := range priorities {
 		// get latest upload waiting in the queue
 		for _, ul := range uploads[priority] {
@@ -233,7 +238,7 @@ func main() {
 	<-done
 
 	logging.Info("script finished")
-
+    //TODO where will be sent email with all the errors during run?
 }
 
 func checkUploadResult(reschan <-chan uploadResult,
