@@ -33,7 +33,7 @@ func (flags *cmdflags) parseCmdFlags() {
 	flag.BoolVar(&flags.force, "force", false, "force report running")
 	flag.IntVar(&flags.days, "days", 1, "How many days to sync...")
 	//TODO change variable threads to instances or something else
-    flag.IntVar(&flags.threads, "threads", 5, "How many threads to run...")
+    flag.IntVar(&flags.threads, "threads", 4, "How many threads to run...")
 	flag.StringVar(&flags.todate, "todate", "", "generate feed for 'todate'")
 	flag.Parse()
 }
@@ -134,7 +134,8 @@ func main() {
 	}
 
 	uploads := make(map[int][]*upload)
-	//numUploads := 0
+    errorList := make([]string, 0)
+    allUploads := 0
 
 	// create queue of uploads according to queue
     //TODO add priority within the queue
@@ -154,10 +155,12 @@ func main() {
 			q[0] = ul
 			uploads[nqueue] = q
 		}
+        allUploads++
 	}
 
     //TODO these are not priorities but queue (just to avid confusion)
 	priorities := make([]int, 0)
+
 	for p := range uploads {
 		priorities = append(priorities, p)
 	}
@@ -168,58 +171,88 @@ func main() {
 	var rusMutex = &sync.Mutex{}
 
 	// Channel for receiving upload rsult
-	result := make(chan uploadResult)
+	result := make(chan uploadResult, flags.threads)
 
 	// Channel for stopping checkUploadResult routine
-	stop := make(chan bool)
+	stop := make(chan bool, 1)
 
 	//channel indicating checkUploadResult routine is done
-	done := make(chan bool)
+	done := make(chan bool, 1)
+
+    //channel indicating checkUploadResult routine is done
+	interrupt := make(chan bool, 1)
 
 	// create ticker for pinging running uploads
 	ticker := time.NewTicker(time.Second * 60)
 
 	//start goroutine for checking syscalls to catch kill calls
-	kill := make(chan os.Signal, 10)
+	kill := make(chan os.Signal, 1)
 	signal.Notify(kill, os.Interrupt, syscall.SIGKILL, syscall.SIGINT, syscall.SIGTSTP, syscall.SIGTERM)
 
 	// start goroutine for checking results
-	go checkUploadResult(result, &runningUploads, logging, stop, done, rusMutex, runningUploadSections, ticker.C, kill)
+	go checkUploadResult(result,
+                        &runningUploads,
+                        logging,
+                        stop,
+                        done,
+                        interrupt,
+                        rusMutex,
+                        runningUploadSections,
+                        ticker.C,
+                        kill,
+                        &errorList)
 
-	// Start runUpload for each upload from priority map. maximum number of
+	killdone := false
+    // Start runUpload for each upload from priority map. maximum number of
 	// routines is defined in command line.
     // TODO priority here is queue
-	for _, priority := range priorities {
-		// get latest upload waiting in the queue
-		for _, ul := range uploads[priority] {
-			for {
-				// get number of running upload sections
-				rusMutex.Lock()
-				runningUploads = len(runningUploadSections)
-				rusMutex.Unlock()
-				if runningUploads < flags.threads {
-					// create new channel for pinging
-					ping := make(chan bool)
-					ul.ping = ping
-					// channel for killing upload routines
-					abortUpload := make(chan bool)
-					ul.abortUpload = abortUpload
-					// start goroutine
-					go ul.runUpload(result)
-					// add uploas section to slice of running sections
-					rusMutex.Lock()
-					runningUploadSections[ul.m_name] = ul
-					rusMutex.Unlock()
-					break
-				} else {
-					fmt.Println("waiting for thread to become available")
-					time.Sleep(time.Second)
-				}
-			}
-		}
-	}
 
-	// wait until last routines are done
+    label_for:
+        for _, priority := range priorities {
+            // get latest upload waiting in the queue
+    		for _, ul := range uploads[priority] {
+
+                    for {
+        				// get number of running upload sections
+        				rusMutex.Lock()
+        				runningUploads = len(runningUploadSections)
+        				rusMutex.Unlock()
+
+                        // when more recources available than running jobs
+        				select {
+                        case <-interrupt:
+                                logging.Debug("SELECT")
+                                killdone = true
+                                break label_for
+                        default:
+                        }
+                        if runningUploads < flags.threads {
+                           // create new channel for pinging
+        					ping := make(chan bool, 1)
+        					ul.ping = ping
+
+                            // create channel for killing upload routines
+        					abortUpload := make(chan bool, 1)
+        					ul.abortUpload = abortUpload
+                            // start goroutine
+        					go ul.runUpload(result)
+
+                            // add upload section to slice of running sections
+        					rusMutex.Lock()
+        					runningUploadSections[ul.m_name] = ul
+        					rusMutex.Unlock()
+        					break
+        				} else {
+            					fmt.Println("waiting for thread to become available")
+            					time.Sleep(time.Second)
+        				}
+        			}
+    		}
+    	}
+
+
+    // wait until last routines (alive or killed) are done
+    logging.Debug("waiting for uploads to finish")
 	for {
 		rusMutex.Lock()
 		runningUploads = len(runningUploadSections)
@@ -227,9 +260,10 @@ func main() {
 		if runningUploads == 0 {
 			break
 		}
-		fmt.Println("waiting to finish")
+		fmt.Println("waiting to finish", runningUploads)
 		time.Sleep(time.Second)
 	}
+    logging.Debug("all uploads finished")
 
 	// Stop checkUploadResult
 	stop <- true
@@ -237,7 +271,14 @@ func main() {
 	// wait until checkUploadResult routine is done
 	<-done
 
-	logging.Info("script finished")
+	if killdone {
+        logging.Error("main process was terminated")
+    }
+    logging.Info(fmt.Sprintf("There was %v errors in %v uploads", len(errorList), allUploads))
+    for _, e := range errorList {
+        logging.Error(e)
+    }
+
     //TODO where will be sent email with all the errors during run?
 }
 
@@ -246,67 +287,68 @@ func checkUploadResult(reschan <-chan uploadResult,
 	logging *logrus.Logger,
 	stop <-chan bool,
 	done chan<- bool,
+    interrupt chan<- bool,
 	rusMutex *sync.Mutex,
 	runningUploadSections map[string]*upload,
 	ticker <-chan time.Time,
-	kill <-chan os.Signal) {
+	kill <-chan os.Signal,
+    errorList *[]string) {
 	for {
 		select {
-		case result := <-reschan:
-			if result.err != nil {
-				result.logger.Error(fmt.Sprintf("Upload '%v' encounter error %v", result.name, result.err))
+
+        // when upload return result
+        case result := <-reschan:
+			logging.Debug("receive result from upload")
+            if result.err != nil {
+                // log error message
+                result.logger.Error(result.err)
+                // add error to list of errors
+                *errorList = append(*errorList, fmt.Sprintf("Upload '%v' encounter error: %v", result.name, result.err))
 			}
+
 			// remove upload section from slice of running sections
+            // main prorgam should allocate new job for freed thread
 			rusMutex.Lock()
 			delete(runningUploadSections, result.name)
 			rusMutex.Unlock()
-		case <-ticker:
-			rusMutex.Lock()
+
+        // ask upload for status update
+        case <-ticker:
+			//rusMutex.Lock()
 			for _, ul := range runningUploadSections {
 				ul.ping <- true
 			}
-			rusMutex.Unlock()
-		case k := <-kill:
+			//rusMutex.Unlock()
+
+        // watch for syscalls' terminate signal
+        case k := <-kill:
 			switch k {
-			case syscall.SIGKILL, syscall.SIGINT, syscall.SIGTSTP, syscall.SIGTERM:
-				for _, ul := range runningUploadSections {
-					ul.abortUpload <- true
-				}
+    			case syscall.SIGKILL, syscall.SIGINT, syscall.SIGTSTP, syscall.SIGTERM:
+    				logging.Debug("kill main process, ", k)
+                    // stop main process from creating new uploads
+                    interrupt<-true
+                    logging.Debug("waiting")
+                    // to make sure all runUploads were put to the list of active uploads
+                    time.Sleep(time.Second)
+                    // kill active uploads
+                    logging.Debug("start sending kill signals")
+                    for _, ul := range runningUploadSections {
+    					// send once to kill upload or runBashCmd
+                        logging.Debug("kill it")
+                        ul.abortUpload <- true
+    				}
+                    //rusMutex.Unlock()
 			}
+
+        // kill this goroutine
 		case <-stop:
+            logging.Debug("STOP")
 			done <- true
 			return
-		default:
+
+        // otherwise sleep
+        default:
 			time.Sleep(time.Millisecond * 10)
 		}
 	}
 }
-
-/*
-syscall.SIGKILL, syscall.SIGINT, syscall.SIGTSTP, syscall.SIGTERM
-history table
-result: success/not; bool
-started: when started; goroutine starts
-stop time: when done; goroutine finishes (defer)
-name/id from config
-parameters: jsonb. until when data was copied;
-
-
-1. cmd line flags
-2. create logging
-    create errors
-3. create history table (could already exist). in postgres
-4. read config file:
-    for each 'upload' create upload thread (name as id):
-    4.1 create source and destination. for either of them:
-        4.1.1 get info about time for latest available data
-    4.2 for last run: if not succesful: then run with same parameters as in table
-                      else: if time since time in 4.1.1 > from parameters(jsonb) then run routine
-                            else: write to log and exit
-5. main thread writes into log every minute who is running and how long
-6. When all threads are done; exit main program. send email with errors.
-
-
-
-
-*/

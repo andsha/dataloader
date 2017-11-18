@@ -3,6 +3,7 @@
 package main
 
 import(
+    "bytes"
     "errors"
     "fmt"
     "os/exec"
@@ -18,6 +19,7 @@ type pgtable struct {
 }
 
 func (t *pgtable) checkTable(description []tableDescription) error{
+    t.upload.m_logger.Debug("description:", description)
     if err := t.connect(); err != nil {return err}
     defer t.disconnect()
 
@@ -62,9 +64,11 @@ func (t *pgtable) checkTable(description []tableDescription) error{
         if pkey != "" {
             pkey = fmt.Sprintf(", primary key (%v)", pkey[1:])
         }
-
+        t.upload.m_logger.Debug("fields:", fields)
         sql := fmt.Sprintf(`CREATE TABLE "%v"."%v" (%v%v)
         `, schema, table, fields[1:], pkey)
+        t.upload.m_logger.Debug()
+
         if _, err := t.pgprocess.Run(sql); err != nil {return err}
         return nil
     }
@@ -201,6 +205,16 @@ func (t *pgtable) getTableDescription() ([]tableDescription, error){
     schema, _ := sourceTables[0].GetSingleValue("schema", "")
     table, _ := sourceTables[0].GetSingleValue("table", "")
 
+    //check if table exists in source
+    sql := fmt.Sprintf(`SELECT 1 FROM information_schema.tables
+           WHERE table_schema = '%v' AND table_name = '%v'
+    `, schema, table)
+    res, err := t.pgprocess.Run(sql)
+    if err != nil {return nil, err}
+    if len(res) == 0 {
+        return nil, errors.New(fmt.Sprintf("Table %v.%v does not exist in source", schema, table))
+    }
+
     // list of excluded fields
     var excludedFields []string
     efs, _ := t.tablesection.GetSingleValue("excludedFields", "")
@@ -241,11 +255,11 @@ func (t *pgtable) getTableDescription() ([]tableDescription, error){
     }
 
     // List of fields in source table
-    sql := fmt.Sprintf(`SELECT column_name, data_type, character_maximum_length, numeric_precision, numeric_scale
+    sql = fmt.Sprintf(`SELECT column_name, data_type, character_maximum_length, numeric_precision, numeric_scale
                         FROM information_schema.columns
                         WHERE table_schema = '%v' and table_name = '%v'
     `, schema, table)
-    res, err := t.pgprocess.Run(sql)
+    res, err = t.pgprocess.Run(sql)
     t.upload.m_logger.Debug(sql, "\n", res)
     if err != nil {return nil, err}
 
@@ -364,7 +378,7 @@ func (t *pgtable) getAvailabeDataTimeRanges() ([][]time.Time, error) {
         }
     }
 
-    // define toDate
+   // define toDate
     td := t.upload.m_flags.todate
     var toDate time.Time
     if td != "" {
@@ -402,6 +416,8 @@ func (t *pgtable) getAvailabeDataTimeRanges() ([][]time.Time, error) {
         timeRange := []time.Time {beginning, latestAvailableTime}
         timeRanges = append(timeRanges, timeRange)
     } else {
+
+         t.upload.m_logger.Debug("lad", latestAvailableTime, "toDate", toDate, "uploadTime", uploadTime)
         var start time.Time
         var end   time.Time
 
@@ -415,6 +431,7 @@ func (t *pgtable) getAvailabeDataTimeRanges() ([][]time.Time, error) {
         if force {
             start = end.AddDate(0,0,-days)
         } else {
+            t.upload.m_logger.Debug(uploadTime, latestAvailableTime, uploadTime.Before(latestAvailableTime))
             if !uploadTime.Before(latestAvailableTime) {
                 //t := var []time.Time{}
                 return [][]time.Time{}, nil
@@ -425,7 +442,7 @@ func (t *pgtable) getAvailabeDataTimeRanges() ([][]time.Time, error) {
                 start = uploadTime.AddDate(0,0,-days)
             }
         }
-
+        t.upload.m_logger.Debug(start, end)
         if start.After(end) {return nil, errors.New(fmt.Sprintf("Start date after End date for table %v", tablename))}
 
         // make sure start is before ToDate in time ranges
@@ -483,32 +500,36 @@ func (t *pgtable) cleanup() error {
 }
 
 func (t *pgtable) getData([]time.Time) ([]byte, error) {
-    res, err := executeBashCmd("sleep 60", t.upload.abortUpload)
+    output, errout, err := executeBashCmd("sleep 60", t.upload.abortUpload)
+    t.upload.m_logger.Debug("output:'", output, "' output error:'", errout, "' error:'", err, "'")
     if err != nil {
         return nil, err
     }
 
-    _=res
-
     return nil, nil
 }
 
-func executeBashCmd(command string, abort <-chan bool) (string, error) {
+// executes command in bash. Keeps track of process and kills it if it becomes terminated
+// returns standard output, standard error, and result. result is <nil> if no error
+func executeBashCmd(command string, abort <-chan bool) (string, string, error) {
     // create command
     cmd := exec.Command("sh", "-c", command)
 
     //get stdout to read result
     stdout, err := cmd.StdoutPipe()
     if err != nil {
-        return "", err
+        return "", "", err
     }
 
-    // create buffer for result
-    res := make([]byte, 1024)
+    // get error output
+    stderr, err := cmd.StderrPipe()
+    if err != nil {
+        return "", "", err
+    }
 
     // start command
     if err := cmd.Start(); err != nil {
-        return "", err
+        return "", "", err
     }
 
     // get pid
@@ -525,28 +546,29 @@ func executeBashCmd(command string, abort <-chan bool) (string, error) {
             }
             select {
                 case <-abort :
+                    fmt.Println("kill me")
                     cmd.Process.Kill()
                     return
                 default:
             }
-            time.Sleep(time.Second * 60)
+            time.Sleep(time.Second * 10)
         }
     }()
 
+    // read any standard output into buffer
+    output := new(bytes.Buffer)
+    output.ReadFrom(stdout)
 
-
-    // read any results into buffer
-    _, errout := stdout.Read(res)
+    // read any error output into buffer
+    errout := new(bytes.Buffer)
+    errout.ReadFrom(stderr)
 
     //Wait for command to finish
-    if err := cmd.Wait(); err != nil {
-        return "", err
-    }
-
-    // deal with result
-    return string(res), errout
+    res := cmd.Wait()
 
 
+    // return result
+    return output.String(), errout.String(), res
 }
 
 

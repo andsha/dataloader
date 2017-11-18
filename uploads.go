@@ -20,6 +20,8 @@ type upload struct {
 	m_pgconTimeRanges      *postgresutils.PostgresProcess
 	ping          chan bool
 	abortUpload   chan bool
+    m_sourceTable *table
+    m_destTable   *table
 }
 
 type uploadResult struct {
@@ -74,10 +76,10 @@ func (ul *upload) runUpload(result chan<- uploadResult) {
 	res.logger = ul.m_logger
 
 	// stopping channel
-	stop := make(chan bool)
+	stop := make(chan bool, 1)
 
 	// pinging routine
-	go ul.pingUpload(ul.ping, ul.abortUpload, stop)
+	go ul.pingUpload(ul.ping, stop)
 
 	ul.m_logger.Info("Start upload")
 
@@ -88,80 +90,80 @@ func (ul *upload) runUpload(result chan<- uploadResult) {
     if err != nil {res.err = err; result <- *res; return}
     tableSource, err := NewTable(tableSourceSections[0], ul)
     if err != nil {res.err = err; result <- *res; return}
+    ul.m_sourceTable = &tableSource
     ul.m_logger.Debug("source table created")
 
     // get table description
     ul.m_logger.Debug("Start generating table description")
     tsDescription, err := tableSource.getTableDescription()
-    if err != nil {
-        if e := cleanup(&tableSource, nil); e != nil{res.err = errors.New(fmt.Sprintf("Error during cleaning-up process after '%v' error", err))} else{res.err = err}
-        result <- *res; return}
+    if e := ul.checkError(err, res, result, stop); e != nil {return}
     ul.m_logger.Debug("Table description generated")
 
      // get time ranges
     tsAvailableDataTimeRanges, err := tableSource.getAvailabeDataTimeRanges()
-    if err != nil {
-        if e := cleanup(&tableSource, nil); e != nil{res.err = errors.New(fmt.Sprintf("Error during cleaning-up process after '%v' error", err))} else{res.err = err}
-        result <- *res; return}
+    if e := ul.checkError(err, res, result, stop); e != nil {return}
     ul.m_logger.Debug("time ranges generated", tsAvailableDataTimeRanges)
 
     // get destination table
     tdName, err := ul.m_sec.GetSingleValue("destTable", "")
-    if err != nil {
-        if e := cleanup(&tableSource, nil); e != nil{res.err = errors.New(fmt.Sprintf("Error during cleaning-up process after '%v' error", err))} else{res.err = err}
-        result <- *res; return}
+    if e := ul.checkError(err, res, result, stop); e != nil {return}
     tableDestSections, err := ul.m_vconfig.GetSectionsByVar("table", "name", tdName)
-    if err != nil {
-        if e := cleanup(&tableSource, nil); e != nil{res.err = errors.New(fmt.Sprintf("Error during cleaning-up process after '%v' error", err))} else{res.err = err}
-        result <- *res; return}
+    if e := ul.checkError(err, res, result, stop); e != nil {return}
     tableDestination, err := NewTable(tableDestSections[0], ul)
-    if err != nil {
-        if e := cleanup(&tableSource, nil); e != nil{res.err = errors.New(fmt.Sprintf("Error during cleaning-up process after '%v' error", err))} else{res.err = err}
-        result <- *res; return}
+    if e := ul.checkError(err, res, result, stop); e != nil {return}
+    ul.m_destTable = &tableDestination
     ul.m_logger.Debug("destination table created")
 
     // check destination table with source description
     ul.m_logger.Debug("Begin checing table")
-    if err := tableDestination.checkTable(tsDescription); err != nil {
-        if e := cleanup(&tableSource, &tableDestination); e != nil{res.err = errors.New(fmt.Sprintf("Error during cleaning-up process after '%v' error", err))} else{res.err = err}
-        result <- *res; return}
+    err = tableDestination.checkTable(tsDescription)
+    if e := ul.checkError(err, res, result, stop); e != nil {return}
     ul.m_logger.Debug("Destination table checked")
 
     if len(tsAvailableDataTimeRanges) > 0 {
         // for each time range
         for _, timeRange := range tsAvailableDataTimeRanges {
+            // check if main process is still running
+            select {
+                case <-ul.abortUpload:
+                    ul.m_logger.Info("Upload received kill signal from main process. Cleaning up.")
+                    ul.cleanup()
+                    ul.m_logger.Info("Exiting")
+                    stop <- true
+                    return
+                default:
+            }
+
+            // timeRange [startTime, endTime]
             start := timeRange[0]
             end := timeRange[1]
             ul.m_logger.Info(fmt.Sprintf("Uploading for [%v, %v] time range", start, end))
 
-            // timeRange [startTime, endTime]
             // get new or reset connection to source
-            if err := tableSource.connect(); err != nil{res.err = err; result <- *res; return}
+            err := tableSource.connect()
+            if e := ul.checkError(err, res, result, stop); e != nil {return}
 
             // get new or reset connection to destination
-            if err := tableDestination.connect(); err != nil{res.err = err; result <- *res; return}
+            err = tableDestination.connect()
+            if e := ul.checkError(err, res, result, stop); e != nil {return}
 
             // receive data from source
+            ul.m_logger.Debug("Start getting data from source")
             data, err := tableSource.getData(timeRange)
-            if err != nil {res.err = err; result <- *res; return}
-
-
+            if e := ul.checkError(err, res, result, stop); e != nil {return}
+            ul.m_logger.Debug("Received data from source")
 
             // Update time ranges table
-            if err := tableSource.updateTimeRanges(start, end, true); err != nil {
-                if e := cleanup(nil, &tableDestination); e != nil{res.err = errors.New(fmt.Sprintf("Error during cleaning-up process after '%v' error", err))} else{res.err = err}
-                result <- *res; return}
+            err = tableSource.updateTimeRanges(start, end, true)
+            if e := ul.checkError(err, res, result, stop); e != nil {return}
 
             // upload data to destination
             err = tableDestination.uploadData(data)
-            if err != nil {
-                if e := cleanup(nil, &tableDestination); e != nil{res.err = errors.New(fmt.Sprintf("Error during cleaning-up process after '%v' error", err))} else{res.err = err}
-                result <- *res; return}
+            if e := ul.checkError(err, res, result, stop); e != nil {return}
 
             // change latestUploadedTimeRange in destination to endTime in timeRange
-            if err := tableSource.updateTimeRanges(start, end, false); err != nil {
-                if e := cleanup(&tableSource, &tableDestination); e != nil{res.err = errors.New(fmt.Sprintf("Error during cleaning-up process after '%v' error", err))} else{res.err = err}
-                result <- *res; return}
+            err = tableSource.updateTimeRanges(start, end, false)
+            if e := ul.checkError(err, res, result, stop); e != nil {return}
 
             ul.m_logger.Info(fmt.Sprintf("Uploading for [%v, %v] time range finished", start, end))
 
@@ -171,23 +173,42 @@ func (ul *upload) runUpload(result chan<- uploadResult) {
     }
 
     // close source and destination and do cleanup
-    if err := cleanup(&tableSource, &tableDestination); err != nil{res.err = errors.New(fmt.Sprintf("Error during cleaning-up process after '%v' error", err)); result <- *res; return}
+    ul.cleanup()
 
 	// once finished return result via channel
 	result <- *res
 }
 
-func cleanup(ts *table, td *table) error {
-    if ts != nil{
-        if err := (*ts).cleanup(); err != nil {return err}
+// cleaning up upload
+func (ul *upload) cleanup() {
+    // cleaning up source
+    if ul.m_sourceTable != nil {
+        if err := (*ul.m_sourceTable).cleanup(); err != nil {
+            ul.m_logger.Error("Error during cleanin up source table", err)
+        }
     }
-    if td != nil{
-        if err := (*td).cleanup(); err != nil {return err}
+    // cleaning up destination
+    if ul.m_destTable != nil {
+        if err := (*ul.m_destTable).cleanup(); err != nil {
+            ul.m_logger.Error("Error during cleanin up destination table", err)
+        }
+    }
+}
+
+// checking errors
+func (ul *upload) checkError(err error, res *uploadResult, result chan<- uploadResult, stop chan bool) error {
+    if err != nil {
+        ul.m_logger.Info("Error in upload", err)
+        ul.cleanup() // do clean up
+        res.err = err // write error to result struct
+        result <- *res // return result channel to main process
+        stop <- true // sent stop to pingUpload
+        return err // return err to upload
     }
     return nil
 }
 
-func (ul *upload) pingUpload(ping <-chan bool, abort <-chan bool, stop <-chan bool) {
+func (ul *upload) pingUpload(ping <-chan bool, stop <-chan bool) {
 	for {
 		select {
 		case <-ping:
@@ -195,13 +216,11 @@ func (ul *upload) pingUpload(ping <-chan bool, abort <-chan bool, stop <-chan bo
 			// if everything is ok log process is still running
             //TODO add info how long process is running
 			ul.m_logger.Info("Process running fine")
-		case <-abort:
-			// abort this upload goroutine
-			ul.m_logger.Info("kill this process")
+		// stop this goroutine
 		case <-stop:
 			return
 		default:
-			time.Sleep(time.Millisecond * 10)
+			time.Sleep(time.Second)
 		}
 	}
 }
