@@ -84,9 +84,10 @@ func main() {
 		logging.Fatal(err)
 	}
     //TODO section is not with secure password but with info how to decode password
-	pwdSection, err := config.GetSections("SECURE PASSWORD")
-	if err != nil {
-		logging.Fatal(err)
+	pwdSections, err := config.GetSections("SECURE PASSWORD")
+    var pwdSection *vconfig.Section
+    if err == nil {
+		pwdSection = pwdSections[0]
 	}
 	pgconnWriteReports, err := postgresutils.NewDB(dbPrams["host"],
 		dbPrams["port"],
@@ -94,7 +95,7 @@ func main() {
 		dbPrams["user"],
 		dbPrams["password"],
 		"disable",
-		pwdSection[0])
+		pwdSection)
 	if err != nil {
 		logging.Fatal(err)
 	}
@@ -273,13 +274,23 @@ func main() {
 
 	if killdone {
         logging.Error("main process was terminated")
-    }
-    logging.Info(fmt.Sprintf("There was %v errors in %v uploads", len(errorList), allUploads))
-    for _, e := range errorList {
-        logging.Error(e)
+        os.Exit(1)
     }
 
+    logging.Info(fmt.Sprintf("There was %v errors in %v uploads", len(errorList), allUploads))
+
+    if len(errorList) > 0 {
+        for _, e := range errorList {
+            logging.Error(e)
+        }
+        os.Exit(1)
+    } else {
+        os.Exit(0)
+    }
+
+
     //TODO where will be sent email with all the errors during run?
+
 }
 
 func checkUploadResult(reschan <-chan uploadResult,
