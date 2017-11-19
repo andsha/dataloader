@@ -512,6 +512,9 @@ func (t *pgtable) getData([]time.Time) ([]byte, error) {
 // executes command in bash. Keeps track of process and kills it if it becomes terminated
 // returns standard output, standard error, and result. result is <nil> if no error
 func executeBashCmd(command string, abort <-chan bool) (string, string, error) {
+    if abort == nil {
+        abort = make(chan bool)
+    }
     // create command
     cmd := exec.Command("sh", "-c", command)
 
@@ -535,6 +538,7 @@ func executeBashCmd(command string, abort <-chan bool) (string, string, error) {
     // get pid
     pid := cmd.Process.Pid
 
+    stop := make(chan bool, 1)
     // check that executing process is still alive. kill if terminated
     go func(){
         for {
@@ -548,6 +552,8 @@ func executeBashCmd(command string, abort <-chan bool) (string, string, error) {
                 case <-abort :
                     fmt.Println("kill me")
                     cmd.Process.Kill()
+                    return
+                case <-stop:
                     return
                 default:
             }
@@ -566,7 +572,7 @@ func executeBashCmd(command string, abort <-chan bool) (string, string, error) {
     //Wait for command to finish
     res := cmd.Wait()
 
-
+    stop <- true
     // return result
     return output.String(), errout.String(), res
 }
