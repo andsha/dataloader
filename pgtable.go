@@ -39,15 +39,20 @@ func (t *pgtable) checkTable(description []tableDescription) error{
 
     t.upload.m_logger.Debug(description)
 
-    destTableName, _ := t.upload.m_sec.GetSingleValue("destTable", "")
+    destTableName, err := t.upload.m_sec.GetSingleValue("destTable", "")
+    if err != nil {return err}
+
     destTables, _ := t.upload.m_vconfig.GetSectionsByVar("table", "name", destTableName)
     schema, _ := destTables[0].GetSingleValue("schema", "")
+    if err != nil {return err}
     table, _ := destTables[0].GetSingleValue("table", "")
+    if err != nil {return err}
 
     // check if dest table exists in destination
     sql := fmt.Sprintf(`SELECT 1 FROM information_schema.tables
            WHERE table_schema = '%v' AND table_name = '%v'
     `, schema, table)
+    t.upload.m_logger.Debug(sql)
     res, err := t.pgprocess.Run(sql)
     if err != nil {return err}
 
@@ -79,6 +84,7 @@ func (t *pgtable) checkTable(description []tableDescription) error{
                         FROM information_schema.columns
                         WHERE table_schema = '%v' and table_name = '%v'
                         `, schema, table)
+
     res, err = t.pgprocess.Run(sql)
     if err != nil {return err}
 
@@ -200,10 +206,14 @@ func (t *pgtable) getTableDescription() ([]tableDescription, error){
     if err != nil {return nil, err}
 
     if description != nil {return description, nil}
-    sourceTableName, _ := t.upload.m_sec.GetSingleValue("sourceTable", "")
+    sourceTableName, err := t.upload.m_sec.GetSingleValue("sourceTable", "")
+    if err != nil {return nil, err}
+
     sourceTables, _ := t.upload.m_vconfig.GetSectionsByVar("table", "name", sourceTableName)
-    schema, _ := sourceTables[0].GetSingleValue("schema", "")
-    table, _ := sourceTables[0].GetSingleValue("table", "")
+    schema, err := sourceTables[0].GetSingleValue("schema", "")
+    if err != nil {return nil, err}
+    table, err := sourceTables[0].GetSingleValue("table", "")
+    if err != nil {return nil, err}
 
     //check if table exists in source
     sql := fmt.Sprintf(`SELECT 1 FROM information_schema.tables
@@ -217,7 +227,9 @@ func (t *pgtable) getTableDescription() ([]tableDescription, error){
 
     // list of excluded fields
     var excludedFields []string
-    efs, _ := t.tablesection.GetSingleValue("excludedFields", "")
+    efs, err := t.tablesection.GetSingleValue("excludedFields", "")
+    if err != nil {return nil, err}
+
     if efs != "" {
         for _, ef := range strings.Split(efs, ",") {
             excludedField := strings.Trim(ef, " ")
@@ -227,7 +239,9 @@ func (t *pgtable) getTableDescription() ([]tableDescription, error){
 
     // primary keys
     pkeys := []string{}
-    if pks, _ := t.tablesection.GetSingleValue("primary_key", ""); pks != "" {
+    pks, err := t.tablesection.GetSingleValue("primary_key", "")
+    if err != nil {return nil, err}
+    if pks != "" {
         for _, pk := range strings.Split(pks, ",") {
             primary_key := strings.Trim(pk, " ")
             pkeys = append(pkeys, primary_key)
@@ -303,7 +317,10 @@ func (t *pgtable) getTableDescription() ([]tableDescription, error){
     }
 
     // MD5
-    if md5s, _ := t.tablesection.GetSingleValue("addMD5ToFields", ""); md5s != "" {
+    md5s, err := t.tablesection.GetSingleValue("addMD5ToFields", "")
+    if err != nil {return nil, err}
+
+    if md5s != "" {
         for _, mdf := range strings.Split(md5s, ",") {
             md5 := strings.Trim(mdf, " ")
             for _, td := range description {
@@ -328,14 +345,17 @@ func (t *pgtable) getAvailabeDataTimeRanges() ([][]time.Time, error) {
     if err := t.connect(); err != nil {return nil, err}
     defer t.disconnect()
     // name for timeRanges table
-    destTableName, _ := t.upload.m_sec.GetSingleValue("destTable", "")
+    destTableName, err := t.upload.m_sec.GetSingleValue("destTable", "")
+    if err != nil {return nil, err}
 
     // get schema name for timeRanges table
     pgConnWiteReportsSection, _ := t.upload.m_vconfig.GetSections("writeReportsPGDB")
-    pgConnWiteReportsSchema, _ := pgConnWiteReportsSection[0].GetSingleValue("schema", "")
+    pgConnWiteReportsSchema, err := pgConnWiteReportsSection[0].GetSingleValue("schema", "")
+    if err != nil {return nil, err}
 
     //  tablename
-    tablename, _ := t.tablesection.GetSingleValue("name", "")
+    tablename, err := t.tablesection.GetSingleValue("name", "")
+    if err != nil {return nil, err}
 
     // find latest upload time (toDate) intimeRanges table
     sql := fmt.Sprintf(`SELECT "ToDate"
@@ -357,9 +377,13 @@ func (t *pgtable) getAvailabeDataTimeRanges() ([][]time.Time, error) {
     // default
     latestAvailableTime := time.Now()
     // if sqlLatestAvailableTime is in host section
-    host, _ := t.tablesection.GetSingleValue("host", "")
+    host, err := t.tablesection.GetSingleValue("host", "")
+    if err != nil {return nil, err}
+
     hostSections, _ := t.upload.m_vconfig.GetSectionsByVar("host", "name", host)
-    latsql, _ := hostSections[0].GetSingleValue("sqlLatestAvailableTime", "")
+    latsql, err := hostSections[0].GetSingleValue("sqlLatestAvailableTime", "")
+    if err != nil {return nil, err}
+
     if len(latsql) > 0 {
         if res, err := t.pgprocess.Run(latsql); err != nil {return nil, err} else{
             if tm, ok := res[0][0].(time.Time); ok {
@@ -369,7 +393,9 @@ func (t *pgtable) getAvailabeDataTimeRanges() ([][]time.Time, error) {
     }
 
     // if sqlLatestAvailableTime is in table section
-    latsql, _ = t.tablesection.GetSingleValue("sqlLatestAvailableTime", "")
+    latsql, err = t.tablesection.GetSingleValue("sqlLatestAvailableTime", "")
+    if err != nil {return nil, err}
+
     if len(latsql) > 0 {
         if res, err := t.pgprocess.Run(latsql); err != nil {return nil, err} else{
             if tm, ok := res[0][0].(time.Time); ok {
@@ -388,7 +414,9 @@ func (t *pgtable) getAvailabeDataTimeRanges() ([][]time.Time, error) {
 
     // define days
     days := t.upload.m_flags.days
-    sdays, _ := t.upload.m_sec.GetSingleValue("daysToLoad", "")
+    sdays, err := t.upload.m_sec.GetSingleValue("daysToLoad", "")
+    if err != nil {return nil, err}
+
     if len(sdays) > 0 {d, _ := strconv.Atoi(sdays); days = d}
 
      // define force
@@ -396,13 +424,18 @@ func (t *pgtable) getAvailabeDataTimeRanges() ([][]time.Time, error) {
 
     // define full reload
     fullReload := false
-    if fr, _ := t.upload.m_sec.GetSingleValue("fullReload", ""); len(fr) > 0{
+    fr, err := t.upload.m_sec.GetSingleValue("fullReload", "")
+    if err != nil {return nil, err}
+
+    if len(fr) > 0{
         fullReload = true
     }
 
     // define perMonth
     perMonth := false
-    if pm, _ := t.upload.m_sec.GetSingleValue("perMonth", "false"); len(pm) > 0{
+    pm, err := t.upload.m_sec.GetSingleValue("perMonth", "false")
+    if err != nil {return nil, err}
+    if len(pm) > 0{
         if strings.ToLower(pm) == "true"{
             perMonth = true
         }
@@ -500,7 +533,7 @@ func (t *pgtable) cleanup() error {
 }
 
 func (t *pgtable) getData([]time.Time) ([]byte, error) {
-    output, errout, err := executeBashCmd("sleep 60", t.upload.abortUpload)
+    output, errout, err := executeBashCmd("sleep 1", t.upload.abortUpload)
     t.upload.m_logger.Debug("output:'", output, "' output error:'", errout, "' error:'", err, "'")
     if err != nil {
         return nil, err
@@ -509,6 +542,7 @@ func (t *pgtable) getData([]time.Time) ([]byte, error) {
     return nil, nil
 }
 
+// TODO - why in pgtable???
 // executes command in bash. Keeps track of process and kills it if it becomes terminated
 // returns standard output, standard error, and result. result is <nil> if no error
 func executeBashCmd(command string, abort <-chan bool) (string, string, error) {
@@ -581,11 +615,14 @@ func executeBashCmd(command string, abort <-chan bool) (string, string, error) {
 
 func (t * pgtable) updateTimeRanges (start time.Time, end time.Time, beforeUpload bool) error {
     // name for timeRanges table
-    destTableName, _ := t.upload.m_sec.GetSingleValue("destTable", "")
+    destTableName, err := t.upload.m_sec.GetSingleValue("destTable", "")
+    if err != nil {return  err}
 
     // change latestUploadedTimeRange in destination to startTime in timeRange
     pgConnWiteReportsSection, _ := t.upload.m_vconfig.GetSections("writeReportsPGDB")
-    pgConnWiteReportsSchema, _ := pgConnWiteReportsSection[0].GetSingleValue("schema", "")
+    pgConnWiteReportsSchema, err := pgConnWiteReportsSection[0].GetSingleValue("schema", "")
+    if err != nil {return  err}
+
     sql := ""
     t.upload.m_logger.Debug("beforeUpload:", beforeUpload)
     if beforeUpload{

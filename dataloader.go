@@ -21,8 +21,9 @@ type cmdflags struct {
 	config  string
 	force   bool
 	days    int
-	threads int
+	parallelRuns int
 	todate   string
+	logfile string
 }
 
 // new instance of logger
@@ -32,9 +33,10 @@ func (flags *cmdflags) parseCmdFlags() {
 	flag.StringVar(&flags.config, "config", "", "path to the file that describes configuration")
 	flag.BoolVar(&flags.force, "force", false, "force report running")
 	flag.IntVar(&flags.days, "days", 1, "How many days to sync...")
-	//TODO change variable threads to instances or something else
-    flag.IntVar(&flags.threads, "threads", 4, "How many threads to run...")
+
+        flag.IntVar(&flags.parallelRuns, "parallelRuns", 4, "How many uploads to run in parallel to run...")
 	flag.StringVar(&flags.todate, "todate", "", "generate feed for 'todate'")
+	flag.StringVar(&flags.logfile, "logfile", "", "Where to write logs")
 	flag.Parse()
 }
 
@@ -45,10 +47,8 @@ func main() {
 	flags.parseCmdFlags()
 	//fmt.Println(flags)
 	//Initialize logging
-    //TODO log file get from command line
-    //TODO do not use log.Fatal, because after script done we have to send email with errors
 	var logging = logrus.New()
-	logfile, err := os.OpenFile("/tmp/log", os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0666)
+	logfile, err := os.OpenFile(flags.logfile, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0666)
 	if err != nil {panic(err)}
 	defer logfile.Close()
 	logging.Out = logfile
@@ -69,6 +69,7 @@ func main() {
 	if err != nil {
 		logging.Fatal(fmt.Sprintf("Could not read config %v", configFile))
 	}
+
 	var config lvconfig // this is extension for vconfig
 	config.VConfig = cfg
 
@@ -83,7 +84,7 @@ func main() {
 	if err != nil {
 		logging.Fatal(err)
 	}
-    //TODO section is not with secure password but with info how to decode password
+
 	pwdSections, err := config.GetSections("SECURE PASSWORD")
     var pwdSection *vconfig.Section
     if err == nil {
@@ -99,7 +100,7 @@ func main() {
 	if err != nil {
 		logging.Fatal(err)
 	}
-    //TODO check that defer happens if Fatal called
+
 	defer pgconnWriteReports.CloseDB()
 
 	// update config by expansion of dbUploads
@@ -107,7 +108,7 @@ func main() {
 		logging.Fatal(err)
 	}
 
-    fmt.Println(config.ToString())
+    //fmt.Println(config.ToString())
 
 	// history table
 	schema, err := lsec.GetSingleValue("schema", "")
@@ -129,23 +130,25 @@ func main() {
 	}
 
 	usections, err := config.GetSections("upload")
-	fmt.Println(len(usections))
+	//fmt.Println(len(usections))
 	if err != nil {
 		logging.Fatal(err)
 	}
 
 	uploads := make(map[int][]*upload)
-    errorList := make([]string, 0)
-    allUploads := 0
+    	errorList := make([]string, 0)
+    	allUploads := 0
 
 	// create queue of uploads according to queue
-    //TODO add priority within the queue
+    	//TODO add priority within the queue
 	for _, uploadSection := range usections {
 		// we copy current config to new upload object, thus all futher modifications
 		// won't be propagated to upload
 		ul, err := newUpload(*uploadSection, config, logging, *flags, pgconnWriteReports)
 		if err != nil {logging.Fatal(err)}
-		queue, err := ul.m_sec.GetSingleValue("priority", "5")
+		queue, err := ul.m_sec.GetSingleValue("queue", "5")
+		if err != nil {logging.Fatal(err)}
+
 		if queue == "" {logging.Fatal(err)}
 		nqueue, _ := strconv.Atoi(queue)
 
@@ -159,20 +162,20 @@ func main() {
         allUploads++
 	}
 
-    //TODO these are not priorities but queue (just to avid confusion)
-	priorities := make([]int, 0)
+
+	queues := make([]int, 0)
 
 	for p := range uploads {
-		priorities = append(priorities, p)
+		queues = append(queues, p)
 	}
-	sort.Ints(priorities)
+	sort.Ints(queues)
 
 	runningUploads := 0
 	runningUploadSections := make(map[string]*upload)
 	var rusMutex = &sync.Mutex{}
 
 	// Channel for receiving upload rsult
-	result := make(chan uploadResult, flags.threads)
+	result := make(chan uploadResult, flags.parallelRuns)
 
 	// Channel for stopping checkUploadResult routine
 	stop := make(chan bool, 1)
@@ -180,7 +183,7 @@ func main() {
 	//channel indicating checkUploadResult routine is done
 	done := make(chan bool, 1)
 
-    //channel indicating checkUploadResult routine is done
+        //channel indicating checkUploadResult routine is done
 	interrupt := make(chan bool, 1)
 
 	// create ticker for pinging running uploads
@@ -206,12 +209,11 @@ func main() {
 	killdone := false
     // Start runUpload for each upload from priority map. maximum number of
 	// routines is defined in command line.
-    // TODO priority here is queue
 
     label_for:
-        for _, priority := range priorities {
+        for _, queue := range queues {
             // get latest upload waiting in the queue
-    		for _, ul := range uploads[priority] {
+    		for _, ul := range uploads[queue] {
 
                     for {
         				// get number of running upload sections
@@ -227,7 +229,7 @@ func main() {
                                 break label_for
                         default:
                         }
-                        if runningUploads < flags.threads {
+                        if runningUploads < flags.parallelRuns {
                            // create new channel for pinging
         					ping := make(chan bool, 1)
         					ul.ping = ping
@@ -277,6 +279,7 @@ func main() {
         os.Exit(1)
     }
 
+    //TODO send email with errors
     logging.Info(fmt.Sprintf("There was %v errors in %v uploads", len(errorList), allUploads))
 
     if len(errorList) > 0 {
@@ -288,8 +291,6 @@ func main() {
         os.Exit(0)
     }
 
-
-    //TODO where will be sent email with all the errors during run?
 
 }
 

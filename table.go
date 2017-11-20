@@ -29,8 +29,8 @@ type generictable struct {
 }
 
 func NewTable(tsec *vconfig.Section, ul *upload) (table, error) {
-	tHostName, err := tsec.GetSingleValue("host", "")
-	if err != nil {return nil, err}
+    tHostName, err := tsec.GetSingleValue("host", "")
+    if err != nil {return nil, err}
     tHostSections, err := ul.m_vconfig.GetSectionsByVar("host", "name", tHostName)
     if err != nil {return nil, err}
     tType, err := tHostSections[0].GetSingleValue("type", "")
@@ -52,16 +52,21 @@ func NewTable(tsec *vconfig.Section, ul *upload) (table, error) {
 func (gt *generictable) getGenericTableDescription () ([]tableDescription, error) {
     var description []tableDescription
     gt.upload.m_logger.Debug(gt.upload.m_sec)
-    if fieldMap, _ := gt.upload.m_sec.GetSingleValue("fieldMap", ""); fieldMap != "" {
+    fieldMap, err := gt.upload.m_sec.GetSingleValue("fieldMap", "")
+    if err != nil {return nil, err}
+    if fieldMap != "" {
         gt.upload.m_logger.Debug(fieldMap)
         // get name of destination table
-        destTableName, _ := gt.upload.m_sec.GetSingleValue("destTable", "")
+        destTableName, err := gt.upload.m_sec.GetSingleValue("destTable", "")
+        if err != nil {return nil, err}
 
         //get destination table section
         destinations, _ := gt.upload.m_vconfig.GetSectionsByVar("table", "name", destTableName)
 
         //Check Fields in destination table
-        if fields, _ :=  destinations[0].GetSingleValue("fields", ""); fields != "" {
+        fields, err :=  destinations[0].GetSingleValue("fields", "")
+        if err != nil {return nil, err}
+        if fields != "" {
             maps := strings.Split(fieldMap, ",")
 
             // extract source and dest field names
@@ -82,7 +87,9 @@ func (gt *generictable) getGenericTableDescription () ([]tableDescription, error
                 }
 
                 // extract destination field primary keys
-                if pkeys, _ := destinations[0].GetSingleValue("PrimaryKey", ""); pkeys != "" {
+                pkeys, err := destinations[0].GetSingleValue("PrimaryKey", "")
+                if err != nil {return nil, err}
+                if pkeys != "" {
                     for _, pk := range strings.Split(pkeys, ",") {
                         pkey := strings.Trim(pk, " ")
                         if pkey == d.destName {

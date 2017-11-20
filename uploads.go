@@ -1,7 +1,7 @@
 package main
 
 import (
-	"errors"
+	//"errors"
 	"fmt"
 	//"math/rand"
 	"time"
@@ -50,7 +50,7 @@ func newUpload(sec vconfig.Section,
 	name, err := sec.GetSingleValue("name", "") // name of process
 	if err != nil {
 		logger.WithFields(logrus.Fields{"section": sec.ToString()}).Error("Cannot resolve name of upload section")
-		return nil, errors.New("Cannot resolve name of upload section")
+		return nil, err
 	}
 
 	// create new upload object and fill with data

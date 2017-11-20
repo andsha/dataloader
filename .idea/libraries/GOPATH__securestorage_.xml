@@ -1,0 +1,20 @@
+<component name="libraryTable">
+  <library name="GOPATH &lt;securestorage&gt;">
+    <CLASSES>
+      <root url="file://$PROJECT_DIR$/../.." />
+      <root url="file://$PROJECT_DIR$/../../../golang.org" />
+      <root url="file://$PROJECT_DIR$/../../../liteide" />
+    </CLASSES>
+    <SOURCES>
+      <root url="file://$PROJECT_DIR$/../.." />
+      <root url="file://$PROJECT_DIR$/../../../golang.org" />
+      <root url="file://$PROJECT_DIR$/../../../liteide" />
+    </SOURCES>
+    <excluded>
+      <root url="file://$PROJECT_DIR$/../postgresutils" />
+      <root url="file://$PROJECT_DIR$/../vconfig" />
+      <root url="file://$PROJECT_DIR$/../securestorage" />
+      <root url="file://$PROJECT_DIR$" />
+    </excluded>
+  </library>
+</component>
